@@ -81,7 +81,7 @@ def info():
 # =============================================================================
 
 
-@data_app.command("cache-gfs")
+@data_app.command("gfs")
 def data_cache_gfs(
     dates: str = typer.Option(
         DEFAULT_DATES,
@@ -99,7 +99,7 @@ def data_cache_gfs(
     run_gfs_cache_creation(dates, bbox, source_dir, output_dir, force)
 
 
-@data_app.command("prepare")
+@data_app.command("flights")
 def data_prepare(
     flights_dir: Path = typer.Option(FLIGHTS_DIR, help="Directory with flight logs"),
     cache_dir: Path = typer.Option(GFS_CACHE_DIR, help="Directory with GFS cache"),
@@ -122,7 +122,7 @@ def data_prepare(
     ),
 ):
     """
-    [Stage 1] Analyze flight logs and weather coverage to select quality cells for training.
+    Analyze flight logs and weather coverage to select quality cells for training.
     """
     import json
 

@@ -1,5 +1,10 @@
 # Paraglideml
 
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-2.0+-ee4c2c?logo=pytorch&logoColor=white)](https://pytorch.org/)
+[![Jupyter](https://img.shields.io/badge/Jupyter-F37626.svg?logo=Jupyter&logoColor=white)](https://jupyter.org/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 **Paraglideml** — ML-система прогнозирования летных условий для парапланеризма на основе метеорологических данных GFS (Global Forecast System) и исторических полётов с XContest.
 
 ## Проект
@@ -8,16 +13,18 @@
 
 Текущий фокус: Альпийский регион (Словения, Италия, Австрия), модель архитектурируется как универсальная для любых горных и равнинных сайтов.
 
+![Alps Region](docs/alps.png)
+
 ---
 
 ## Быстрый старт (Example Data)
 
-Для быстрой проверки работоспособности на включенном в репозиторий примере данных:
+Для быстрой проверки работоспособности на включенном в репозиторий примере данных старта Kobala (Словения):
 
 ```bash
 pip install -e .
 cp .env.example .env
-paraglideml train model --epochs 5
+paraglideml train model
 ```
 
 ## Получение данных (Data Acquisition)
@@ -33,6 +40,8 @@ paraglideml train model --epochs 5
    - Источник: [XContest](https://www.xcontest.org/)
    - Путь в проекте: `data/flights/` (настраивается в `.env`)
 
+Можно использовать инструменты скачивания из проекта [PyParaglide](https://github.com/Genajoin/PyParaglide)
+
 ## Полный пайплайн
 
 Проект использует **CLI-first** подход. Все основные операции выполняются через команду `paraglideml`.
@@ -45,16 +54,16 @@ pip install -e .
 paraglideml info
 
 # Шаги пайплайна:
-# 1. Подготовка GFS данных (кэширование)
-paraglideml data cache-gfs
+# 1. Подготовка GFS данных
+paraglideml data gfs
 
-# 2. Анализ полетов и выбор качественных ячеек (Stage 1)
-paraglideml data prepare
+# 2. Анализ полетов и выбор качественных ячеек
+paraglideml data flights
 
-# 3. Сборка обучающего датасета (Stage 2)
+# 3. Сборка обучающего датасета
 paraglideml data build
 
-# 4. Обучение модели (Stage 3)
+# 4. Обучение модели
 paraglideml train model
 ```
 
@@ -66,14 +75,14 @@ paraglideml train model
 ┌─────────────────────────────────────────────────────────────────┐
 │ 1. ПОДГОТОВКА ДАННЫХ                                            │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Кэширование GFS: paraglideml data cache-gfs                   │
-│   → Извлекает 135+ параметров из GRIB2 в NPZ                   │
+│ • Кэширование GFS: paraglideml data gfs                         │
+│   → Извлекает 135+ параметров из GRIB2 в NPZ                    │
 │   → Использует настройки дат и региона из .env                  │
-│                                                                  │
-│ • Анализ ячеек: paraglideml data prepare                        │
+│                                                                 │
+│ • Анализ ячеек: paraglideml data flights                        │
 │   → Вычисляет качество ячеек (flights, coverage)                │
 │   → Создает data/processed/selected_cells.json                  │
-│                                                                  │
+│                                                                 │
 │ • Сбор датасета: paraglideml data build                         │
 │   → Объединяет weather + flights в multicell_dataset.csv        │
 └─────────────────────────────────────────────────────────────────┘
@@ -90,13 +99,13 @@ paraglideml train model
 ┌─────────────────────────────────────────────────────────────────┐
 │ 3. АНАЛИЗ РЕЗУЛЬТАТОВ                                           │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Сводка:  paraglideml analyze summary [exp_XXX]               │
-│             (по умолчанию — последний эксперимент)             │
-│ • Ошибки:  paraglideml analyze errors [exp_XXX]                │
-│             (по умолчанию — последний эксперимент)             │
-│ • Сравнение: paraglideml analyze compare --limit 5             │
-│ • Ноутбуки: notebooks/05_multiregional_model.ipynb             │
-│                                                                  │
+│ • Сводка:  paraglideml analyze summary [exp_XXX]                │
+│             (по умолчанию — последний эксперимент)              │
+│ • Ошибки:  paraglideml analyze errors [exp_XXX]                 │
+│             (по умолчанию — последний эксперимент)              │
+│ • Сравнение: paraglideml analyze compare --limit 5              │
+│ • Ноутбуки: notebooks/05_multiregional_model.ipynb              │
+│                                                                 │
 │ Артефакты (в папке эксперимента):                               │
 │   ├── model.pth, config.json, report.txt                        │
 │   ├── training_history.png, confusion_matrix.png                │
@@ -140,8 +149,8 @@ paraglideml/
 │   │
 │   ├── data/                     # Обработка данных
 │   │   ├── gfs_processor.py      # Обработка GRIB2 -> NPZ
-│   │   ├── cell_analyzer.py      # Анализ ячеек (Stage 1)
-│   │   ├── dataset_builder.py    # Сборка датасета (Stage 2)
+│   │   ├── cell_analyzer.py      # Анализ ячеек
+│   │   ├── dataset_builder.py    # Сборка датасета
 │   │   ├── flight_parsing.py     # Парсинг XContest
 │   │   └── weather_cache.py      # Чтение NPZ кэша
 │   │
