@@ -1,0 +1,73 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Distribution / Build
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data & Models
+/data/gfs/anl
+/data/gfs/cache/cells/
+/data/flights/*.json
+/data/processed/
+/models/
+*.h5
+*.keras
+*.pkl
+*.pickle
+
+# Debug scripts
+debug_*.py
+GEMINI.md
+CLAUDE.md
+
+data/forecasts/*.grib2
+scripts/archive/training_versions/train_v2.py
+scripts/archive/training_versions/train_v3.py
+scripts/archive/training_versions/train_v5.py
+src/paraglideml/train_v4.py
+
+# Allow example data
+!data/example/

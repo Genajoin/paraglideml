@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "paraglideml"
+version = "0.1.0"
+description = "Machine Learning model to predict paragliding flyable days using GFS data."
+authors = [
+  { name = "Gena", email = "gena@example.com" },
+]
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "typer",
+    "numpy",
+    "pandas",
+    "scikit-learn",
+    # CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
+    "torch",
+    "xarray",
+    "cfgrib",
+    "pygrib",
+    "matplotlib",
+    "seaborn",
+    "tqdm",
+    "cartopy",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "black",
+    "isort",
+    "flake8",
+    "jupyterlab",
+    "ipykernel",
+]
+
+[project.scripts]
+paraglideml = "paraglideml.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
