@@ -5,21 +5,21 @@
 [![Jupyter](https://img.shields.io/badge/Jupyter-F37626.svg?logo=Jupyter&logoColor=white)](https://jupyter.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Paraglideml** — ML-система прогнозирования летных условий для парапланеризма на основе метеорологических данных GFS (Global Forecast System) и исторических полётов с XContest.
+**Paraglideml** is an ML system for forecasting paragliding flight conditions based on GFS (Global Forecast System) meteorological data and historical flight tracks from XContest.
 
-## Проект
+## Project
 
-Цель проекта — предсказывать flyability (летные условия) для конкретных локаций: **Flyable / Not Flyable**.
+The goal is to predict flyability for specific locations: **Flyable / Not Flyable**.
 
-Текущий фокус: Альпийский регион (Словения, Италия, Австрия), модель архитектурируется как универсальная для любых горных и равнинных сайтов.
+Current focus: the Alpine region (Slovenia, Italy, Austria). The model is architected to generalise to any mountain or flatland sites.
 
 ![Alps Region](docs/alps.png)
 
 ---
 
-## Быстрый старт (Example Data)
+## Quick Start (Example Data)
 
-Для быстрой проверки работоспособности на включенном в репозиторий примере данных старта Kobala (Словения):
+To quickly verify a working setup on the bundled example data for the Kobala launch (Slovenia):
 
 ```bash
 pip install -e .
@@ -27,86 +27,86 @@ cp .env.example .env
 paraglideml train model
 ```
 
-## Получение данных (Data Acquisition)
+## Data Acquisition
 
-Для полноценной работы системы (вне режима примера) необходимо подготовить следующие данные:
+For full operation (beyond the example mode), the following data needs to be prepared:
 
-1. **Погода (GFS)**: Скачайте архивы GFS Analysis (0.25 degree) в формате `.grb2`.
-   - Источник: [NOAA GFS S3](https://noaa-gfs-bdp-pds.s3.amazonaws.com/)
-   - Путь в проекте: `data/gfs/anl/YYYY-MM/` (настраивается в `.env`)
-   - Файлы: `gfsanl_3_YYYYMMDD_HH00_000.grb2`
+1. **Weather (GFS)**: download GFS Analysis archives (0.25 degree) in `.grb2` format.
+   - Source: [NOAA GFS S3](https://noaa-gfs-bdp-pds.s3.amazonaws.com/)
+   - Project path: `data/gfs/anl/YYYY-MM/` (configurable via `.env`)
+   - Files: `gfsanl_3_YYYYMMDD_HH00_000.grb2`
 
-2. **Полеты (XContest)**: Экспортируйте данные о полетах за интересующий период и местность в формате `.json`.
-   - Источник: [XContest](https://www.xcontest.org/)
-   - Путь в проекте: `data/flights/` (настраивается в `.env`)
+2. **Flights (XContest)**: export flight data for your period and area of interest in `.json` format.
+   - Source: [XContest](https://www.xcontest.org/)
+   - Project path: `data/flights/` (configurable via `.env`)
 
-Можно использовать инструменты скачивания из проекта [PyParaglide](https://github.com/Genajoin/PyParaglide)
+You can use the downloaders from the [PyParaglide](https://github.com/Genajoin/PyParaglide) project.
 
-## Полный пайплайн
+## Full Pipeline
 
-Проект использует **CLI-first** подход. Все основные операции выполняются через команду `paraglideml`.
+The project uses a **CLI-first** approach. All main operations are run via the `paraglideml` command.
 
 ```bash
-# Установка
+# Install
 pip install -e .
 
-# Проверка конфигурации
+# Check configuration
 paraglideml info
 
-# Шаги пайплайна:
-# 1. Подготовка GFS данных
+# Pipeline steps:
+# 1. Prepare GFS data
 paraglideml data gfs
 
-# 2. Анализ полетов и выбор качественных ячеек
+# 2. Analyse flights and select quality cells
 paraglideml data flights
 
-# 3. Сборка обучающего датасета
+# 3. Build training dataset
 paraglideml data build
 
-# 4. Обучение модели
+# 4. Train the model
 paraglideml train model
 ```
 
 ---
 
-## Пайплайн проекта
+## Project Pipeline
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│ 1. ПОДГОТОВКА ДАННЫХ                                            │
+│ 1. DATA PREPARATION                                             │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Кэширование GFS: paraglideml data gfs                         │
-│   → Извлекает 135+ параметров из GRIB2 в NPZ                    │
-│   → Использует настройки дат и региона из .env                  │
+│ • GFS caching: paraglideml data gfs                             │
+│   → Extracts 135+ parameters from GRIB2 into NPZ                │
+│   → Uses date and region settings from .env                     │
 │                                                                 │
-│ • Анализ ячеек: paraglideml data flights                        │
-│   → Вычисляет качество ячеек (flights, coverage)                │
-│   → Создает data/processed/selected_cells.json                  │
+│ • Cell analysis: paraglideml data flights                       │
+│   → Computes cell quality (flights, coverage)                   │
+│   → Creates data/processed/selected_cells.json                  │
 │                                                                 │
-│ • Сбор датасета: paraglideml data build                         │
-│   → Объединяет weather + flights в multicell_dataset.csv        │
+│ • Dataset build: paraglideml data build                         │
+│   → Joins weather + flights into multicell_dataset.csv          │
 └─────────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│ 2. ОБУЧЕНИЕ МОДЕЛИ                                              │
+│ 2. MODEL TRAINING                                               │
 ├─────────────────────────────────────────────────────────────────┤
 │ • MultiRegional Model: paraglideml train model                  │
-│   → Архитектура: Regional Attention + Confidence Weighting      │
-│   → Оптимизирует Macro F1 Score                                 │
-│   → Результат: models/experiments/exp_XXX/                      │
+│   → Architecture: Regional Attention + Confidence Weighting     │
+│   → Optimises Macro F1 Score                                    │
+│   → Output: models/experiments/exp_XXX/                         │
 └─────────────────────────────────────────────────────────────────┘
                             ↓
 ┌─────────────────────────────────────────────────────────────────┐
-│ 3. АНАЛИЗ РЕЗУЛЬТАТОВ                                           │
+│ 3. RESULTS ANALYSIS                                             │
 ├─────────────────────────────────────────────────────────────────┤
-│ • Сводка:  paraglideml analyze summary [exp_XXX]                │
-│             (по умолчанию — последний эксперимент)              │
-│ • Ошибки:  paraglideml analyze errors [exp_XXX]                 │
-│             (по умолчанию — последний эксперимент)              │
-│ • Сравнение: paraglideml analyze compare --limit 5              │
-│ • Ноутбуки: notebooks/05_multiregional_model.ipynb              │
+│ • Summary:  paraglideml analyze summary [exp_XXX]               │
+│             (defaults to the latest experiment)                 │
+│ • Errors:   paraglideml analyze errors [exp_XXX]                │
+│             (defaults to the latest experiment)                 │
+│ • Compare:  paraglideml analyze compare --limit 5               │
+│ • Notebook: notebooks/05_multiregional_model.ipynb              │
 │                                                                 │
-│ Артефакты (в папке эксперимента):                               │
+│ Artifacts (in experiment folder):                               │
 │   ├── model.pth, config.json, report.txt                        │
 │   ├── training_history.png, confusion_matrix.png                │
 │   ├── tp.csv, tn.csv, fp.csv, fn.csv                            │
@@ -116,70 +116,70 @@ paraglideml train model
 
 ---
 
-## Модель: Multi-Regional Attention
+## Model: Multi-Regional Attention
 
-Актуальная версия модели (`src/paraglideml/multiregional.py`) решает проблему географической вариативности условий.
+The current model version (`src/paraglideml/multiregional.py`) addresses the problem of geographic variability in flight conditions.
 
-**Ключевые особенности:**
-- **K-means кластеризация** — группирует ячейки в регионы на основе координат.
-- **Regional Embedding** — обучаемые вектора, кодирующие специфику региона.
-- **Multi-head Attention** — механизм внимания, адаптирующий общие метео-признаки под конкретный регион.
-- **Confidence Weighting** — взвешивание примеров при обучении на основе уверенности в метке (лётный/нелётный день).
+**Key features:**
+- **K-means clustering** — groups cells into regions based on coordinates.
+- **Regional Embedding** — learnable vectors encoding region-specific characteristics.
+- **Multi-head Attention** — attention mechanism adapting general weather features to a specific region.
+- **Confidence Weighting** — weighting training examples by label confidence (flyable / non-flyable day).
 
-Подробнее: `docs/multiregional.md`
+More details: `docs/multiregional.md`
 
 ---
 
-## Структура проекта
+## Project Structure
 
 ```
 paraglideml/
-├── .env                          # Конфигурация путей и параметров
+├── .env                          # Path and parameter configuration
 ├── pyproject.toml
 ├── README.md
-├── MODEL.md                      # Документация по признакам
-├── CLAUDE.md / GEMINI.md         # Инструкции для AI агентов
+├── MODEL.md                      # Feature documentation
+├── CLAUDE.md / GEMINI.md         # AI agent instructions
 │
 ├── src/paraglideml/
 │   ├── __init__.py
-│   ├── cli.py                    # Точка входа CLI (typer)
-│   ├── config.py                 # Управление конфигурацией
-│   ├── multiregional.py          # Архитектура модели и утилиты
-│   ├── train.py                  # Пайплайн обучения
+│   ├── cli.py                    # CLI entry point (typer)
+│   ├── config.py                 # Configuration management
+│   ├── multiregional.py          # Model architecture and utilities
+│   ├── train.py                  # Training pipeline
 │   │
-│   ├── data/                     # Обработка данных
-│   │   ├── gfs_processor.py      # Обработка GRIB2 -> NPZ
-│   │   ├── cell_analyzer.py      # Анализ ячеек
-│   │   ├── dataset_builder.py    # Сборка датасета
-│   │   ├── flight_parsing.py     # Парсинг XContest
-│   │   └── weather_cache.py      # Чтение NPZ кэша
+│   ├── data/                     # Data processing
+│   │   ├── gfs_processor.py      # GRIB2 → NPZ processing
+│   │   ├── cell_analyzer.py      # Cell analysis
+│   │   ├── dataset_builder.py    # Dataset assembly
+│   │   ├── flight_parsing.py     # XContest parsing
+│   │   └── weather_cache.py      # NPZ cache reader
 │   │
-│   └── analysis/                 # Инструменты анализа
-│       ├── summary.py            # Отчеты и сравнение
-│       └── error_analyzer.py     # Детальный анализ ошибок
+│   └── analysis/                 # Analysis tools
+│       ├── summary.py            # Reports and comparison
+│       └── error_analyzer.py     # Detailed error analysis
 │
-├── notebooks/                    # Jupyter ноутбуки
-│   └── 05_multiregional_model.ipynb # Визуальный анализ и эксперименты
+├── notebooks/                    # Jupyter notebooks
+│   └── 05_multiregional_model.ipynb # Visual analysis and experiments
 │
-├── models/                       # Результаты обучения
-│   └── experiments/              # Эксперименты (exp_XXX/)
+├── models/                       # Training results
+│   └── experiments/              # Experiments (exp_XXX/)
 │
-├── scripts/                      # Вспомогательные скрипты
-│   └── archive/                  # Устаревшие версии
+├── scripts/                      # Helper scripts
+│   └── archive/                  # Deprecated versions
 │
-└── data/                         # Данные
-    ├── gfs/anl/                  # Исходные GRIB2 файлы
-    ├── gfs/cache/                # Обработанный NPZ кэш
-    ├── flights/                  # Логи полетов (JSON)
-    └── processed/                # CSV датасеты и метаданные
+└── data/                         # Data
+    ├── gfs/anl/                  # Raw GRIB2 files
+    ├── gfs/cache/                # Processed NPZ cache
+    ├── flights/                  # Flight logs (JSON)
+    └── processed/                # CSV datasets and metadata
 ```
 
 ---
 
-## Конфигурация
+## Configuration
 
-Все настройки (пути, параметры обучения, диапазоны дат) управляются через файл `.env` в корне проекта.
-Для просмотра текущей конфигурации используйте:
+All settings (paths, training parameters, date ranges) are managed via the `.env` file in the project root.
+To inspect the current configuration:
 
 ```bash
 paraglideml info
@@ -187,14 +187,14 @@ paraglideml info
 
 ---
 
-## Разработка
+## Development
 
 ```bash
-# Форматирование кода
+# Code formatting
 black src/
 isort src/
 
-# Запуск в режиме разработки
+# Editable install
 pip install -e .
 ```
 
