@@ -374,6 +374,33 @@ def forecast(
         typer.echo(f"Forecast failed: {e}", err=True)
 
 
+@app.command("forecast-tiers")
+def forecast_tiers(
+    date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
+    experiment: Optional[str] = typer.Option(
+        None, "--experiment", help="Ordinal experiment (default: latest with model_good.joblib)"
+    ),
+    grib_dir: Optional[str] = typer.Option(None, "--grib-dir", help="Where to download GRIB"),
+    push_threshold: float = typer.Option(
+        0.5, help="P(>=good) threshold for the bot's push decision in the table"
+    ),
+):
+    """
+    Forecast ordinal flight-quality tiers for a date: per-spot P(>=flyable/good/epic).
+
+    Cumulative calibrated probabilities from the `train ordinal` model. The bot pushes
+    on P(>=good); great for eyeballing the tiers against what actually flew on a day.
+    """
+    from .predict import run_ordinal_forecast
+
+    try:
+        run_ordinal_forecast(
+            date_str=date, experiment=experiment, grib_dir=grib_dir, push_threshold=push_threshold
+        )
+    except Exception as e:
+        typer.echo(f"Tier forecast failed: {e}", err=True)
+
+
 # =============================================================================
 # ANALYZE COMMANDS
 # =============================================================================

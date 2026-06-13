@@ -26,6 +26,7 @@ import torch
 from .config import EXPERIMENTS_DIR, GFS_CACHE_DIR, GFS_FORECAST_DIR, PROCESSED_DATA_DIR
 from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import PRESSURE_LEVELS, run_gfs_cache_creation
+from .data.terrain import load_cell_terrain
 from .data.weather_cache import WeatherCache
 from .multiregional import MultiRegionalModel
 
@@ -136,19 +137,14 @@ def _resolve_experiment(experiment: Optional[str]) -> Path:
     return candidates[-1]
 
 
-def run_forecast(
-    date_str: str,
-    experiment: Optional[str] = None,
-    selected_cells_path: Optional[Path] = None,
-    grib_dir: Optional[str] = None,
-) -> pd.DataFrame:
-    """Download GFS for a date, run the model, return a per-cell prediction table."""
-    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
-    grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
+def _fetch_and_extract(date_str: str, grib_root: Path) -> None:
+    """Download the 06/12/18 GFS slices for a date and extract per-cell NPZ cache.
 
-    # 1. Fetch the 06/12/18 slices (byte-range). Prefer the analysis (real
-    #    conditions); if it isn't posted yet (today/future), fall back to the
-    #    forecast valid at that time from the same day's 00z run (f006/f012/f018).
+    Prefers the analysis (real conditions); if not posted yet (today/future), falls
+    back to the forecast valid at that time from the same day's 00z run. Shared by
+    the binary and ordinal forecast paths.
+    """
+    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     print(f">>> Fetching GFS for {date_str} ...")
     sources = {}
     for hour in (6, 12, 18):
@@ -165,7 +161,6 @@ def run_forecast(
             sources[hour] = f"forecast(00z+{hour}h)"
     print(f"  slices: {sources}")
 
-    # 2. Extract per-cell NPZ for the Alps bbox (covers all selected cells).
     print(">>> Extracting features to cache ...")
     run_gfs_cache_creation(
         dates=f"{date_str}:{date_str}",
@@ -174,6 +169,46 @@ def run_forecast(
         output_dir=GFS_CACHE_DIR,
         force=True,
     )
+
+
+def _feature_vector(rec: dict, feature_names: List[str], terrain_cell: Optional[dict]) -> np.ndarray:
+    """Build the model input row, injecting spot-centric terrain features.
+
+    compute_day_features returns weather only; elevation/mountainess are static
+    per-cell and must be supplied from cell_terrain.json at inference, exactly as
+    the dataset builder merges them at training time.
+    """
+    rec = dict(rec)
+    if terrain_cell:
+        rec.setdefault("elevation", float(terrain_cell.get("elevation", 0.0)))
+        rec.setdefault("mountainess", float(terrain_cell.get("mountainess", 0.0)))
+    return np.array([[float(rec.get(f, 0.0)) for f in feature_names]], dtype=np.float32)
+
+
+def _resolve_ordinal_experiment(experiment: Optional[str]) -> Path:
+    """Return the ordinal experiment dir (explicit, or latest with model_good.joblib)."""
+    if experiment:
+        exp_dir = EXPERIMENTS_DIR / experiment
+        if not (exp_dir / "model_good.joblib").exists():
+            raise FileNotFoundError(f"No ordinal model_good.joblib in {exp_dir}")
+        return exp_dir
+    candidates = [d for d in sorted(EXPERIMENTS_DIR.iterdir()) if (d / "model_good.joblib").exists()]
+    if not candidates:
+        raise FileNotFoundError(f"No ordinal experiments (model_good.joblib) in {EXPERIMENTS_DIR}")
+    return candidates[-1]
+
+
+def run_forecast(
+    date_str: str,
+    experiment: Optional[str] = None,
+    selected_cells_path: Optional[Path] = None,
+    grib_dir: Optional[str] = None,
+) -> pd.DataFrame:
+    """Download GFS for a date, run the model, return a per-cell prediction table."""
+    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
+
+    _fetch_and_extract(date_str, grib_root)
 
     # 3. Load model artifacts.
     exp_dir = _resolve_experiment(experiment)
@@ -198,6 +233,7 @@ def run_forecast(
         selected_cells_path = PROCESSED_DATA_DIR / "selected_cells.json"
     cells = json.loads(Path(selected_cells_path).read_text())
     cache = WeatherCache(cache_root=str(GFS_CACHE_DIR))
+    terrain = load_cell_terrain() or {}
     ts = pd.Timestamp(target)
 
     rows = []
@@ -206,7 +242,7 @@ def run_forecast(
         rec = compute_day_features(cache, lat, lon, ts)
         if rec is None:
             continue
-        x = np.array([[float(rec.get(f, 0.0)) for f in feature_names]], dtype=np.float32)
+        x = _feature_vector(rec, feature_names, terrain.get(cell))
         xs = scaler.transform(x)
         region = int(region_map.get(cell, 0))
         with torch.no_grad():
@@ -245,4 +281,76 @@ def run_forecast(
         n_fly = int(df["flyable"].sum())
         print(f"\n  {n_fly}/{len(df)} cells above threshold "
               f"(regional signal: {'STRONG' if n_fly >= 5 else 'weak — treat with caution'}).")
+    return df
+
+
+def run_ordinal_forecast(
+    date_str: str,
+    experiment: Optional[str] = None,
+    selected_cells_path: Optional[Path] = None,
+    grib_dir: Optional[str] = None,
+    push_threshold: float = 0.5,
+) -> pd.DataFrame:
+    """Run the ordinal tier models for a date: per-cell P(>=flyable/good/epic).
+
+    Cumulative, calibrated probabilities (monotone by construction). The bot pushes
+    on P(>=good); the other tiers add context. Uses the GFS analysis for a past date
+    (real conditions) — ideal for eyeballing the tiers against what actually flew.
+    """
+    from .ordinal import TIERS
+
+    labels = [lbl for _, lbl in TIERS]
+    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
+
+    _fetch_and_extract(date_str, grib_root)
+
+    exp_dir = _resolve_ordinal_experiment(experiment)
+    feature_names = (exp_dir / "features.txt").read_text().splitlines()
+    region_map = json.loads((exp_dir / "region_mapping.json").read_text())
+    models = {lbl: joblib.load(exp_dir / f"model_{lbl}.joblib") for lbl in labels}
+    calibrators = {lbl: joblib.load(exp_dir / f"calibrator_{lbl}.joblib") for lbl in labels}
+    print(f">>> Ordinal model: {exp_dir.name} ({len(feature_names)} features, tiers {labels})")
+
+    if selected_cells_path is None:
+        selected_cells_path = PROCESSED_DATA_DIR / "selected_cells.json"
+    cells = json.loads(Path(selected_cells_path).read_text())
+    cache = WeatherCache(cache_root=str(GFS_CACHE_DIR))
+    terrain = load_cell_terrain() or {}
+    ts = pd.Timestamp(target)
+
+    rows = []
+    for cell in cells:
+        lat, lon = map(int, cell.split("_"))
+        rec = compute_day_features(cache, lat, lon, ts)
+        if rec is None:
+            continue
+        x = _feature_vector(rec, feature_names, terrain.get(cell))
+        # Calibrated probability per tier, then clamp to be non-increasing.
+        probs = [float(calibrators[lbl].transform(models[lbl].predict_proba(x)[:, 1])[0]) for lbl in labels]
+        for i in range(1, len(probs)):
+            probs[i] = min(probs[i], probs[i - 1])
+        row = {"cell": cell, "lat": lat, "lon": lon, "region": int(region_map.get(cell, 0))}
+        row.update({f"p_{lbl}": p for lbl, p in zip(labels, probs)})
+        rows.append(row)
+
+    if not rows:
+        print(f"\n=== Tier forecast for {date_str} ===")
+        print("  No cells with data — the 12 UTC slice is unavailable for this date.")
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).sort_values("p_good", ascending=False).reset_index(drop=True)
+
+    print(f"\n=== Flight-quality tiers for {date_str}  (P>=flyable / good / epic) ===")
+    for _, r in df.iterrows():
+        bar = "#" * int(round(r["p_good"] * 20))
+        push = "→PUSH" if r["p_good"] >= push_threshold else "     "
+        print(f"  {r['cell']:>6}  r{r['region']}  "
+              f"fly {r['p_flyable']*100:4.0f}%  good {r['p_good']*100:4.0f}%  "
+              f"epic {r['p_epic']*100:4.0f}%  {push} {bar}")
+    n_good = int((df["p_good"] >= push_threshold).sum())
+    n_epic = int((df["p_epic"] >= push_threshold).sum())
+    print(f"\n  {n_good}/{len(df)} cells P(>=good)>={push_threshold:.0%}, "
+          f"{n_epic} P(>=epic)>={push_threshold:.0%} "
+          f"(regional signal: {'STRONG' if n_good >= 5 else 'weak — treat with caution'}).")
     return df
