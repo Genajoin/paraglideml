@@ -442,7 +442,11 @@ def load_and_prepare_data(
     print(f"  Train balance: {train_df['is_flyable'].mean():.1%} flyable")
     print(f"  Test balance:  {test_df['is_flyable'].mean():.1%} flyable")
 
-    # Extract feature names
+    # Extract feature names.
+    # NOTE: is_weekend and day_of_year are dropped on purpose. They are calendar
+    # artifacts of the labeling process (more pilots fly on weekends), not weather,
+    # and leaked the "weekend -> flyable" shortcut into the model. is_weekend stays
+    # available for the label-confidence logic only, never as a predictor.
     drop_cols = [
         "date",
         "year",
@@ -453,6 +457,8 @@ def load_and_prepare_data(
         "cell_lon",
         "label_confidence",
         "region_id",
+        "is_weekend",
+        "day_of_year",
     ]
     feature_names = [c for c in df.columns if c not in drop_cols]
     print(f"  Features: {len(feature_names)}")
@@ -469,7 +475,9 @@ def create_data_loaders(
 ) -> Tuple[
     DataLoader,
     DataLoader,
+    DataLoader,
     StandardScaler,
+    np.ndarray,
     np.ndarray,
     np.ndarray,
     np.ndarray,
@@ -478,91 +486,92 @@ def create_data_loaders(
     np.ndarray,
 ]:
     """
-    Create PyTorch DataLoaders with scaling and train/val split.
+    Create PyTorch DataLoaders with scaling and a TEMPORAL train/val split.
+
+    The validation set is the most recent year present in ``train_df`` (e.g. 2024),
+    held out chronologically instead of sampled at random. A random split leaks
+    near-duplicate samples into validation (the same day spans ~45 cells and
+    adjacent days are strongly autocorrelated), which makes early stopping and
+    threshold selection over-optimistic. A temporal split mirrors the real task:
+    choose hyperparameters/threshold on an unseen future year, then report on the
+    held-out test year. The scaler is fit on the training years only.
 
     Args:
-        train_df: Training DataFrame
+        train_df: Training DataFrame (must contain a 'year' column)
         test_df: Test DataFrame
         feature_names: List of feature column names
         config: Configuration object
-        scaler: Optional fitted scaler (for reproducible splits)
+        scaler: Optional fitted scaler (re-used instead of re-fitting if provided)
 
     Returns:
-        train_loader: Training DataLoader
-        val_loader: Validation DataLoader
-        scaler: Fitted StandardScaler
-        X_train: Training features (scaled)
-        y_train: Training labels
-        region_train: Training region IDs
-        conf_train: Training confidence weights
-        X_test: Test features (scaled)
-        y_test: Test labels
-        region_test: Test region IDs
-        conf_test: Test confidence weights
+        train_loader, val_loader, test_loader, scaler,
+        y_train (training labels, for loss weighting),
+        X_val, y_val, region_val,
+        X_test, y_test, region_test
     """
+    # Temporal validation split: hold out the most recent training year.
+    val_year = int(train_df["year"].max())
+    is_val = train_df["year"] == val_year
+    fit_df = train_df[~is_val]
+    val_df = train_df[is_val]
+
     # Extract features
-    X_train_raw = train_df[feature_names].values.astype(np.float32)
-    y_train = train_df["is_flyable"].values.astype(np.float32)
+    X_fit_raw = fit_df[feature_names].values.astype(np.float32)
+    y_train = fit_df["is_flyable"].values.astype(np.float32)
+    X_val_raw = val_df[feature_names].values.astype(np.float32)
+    y_val = val_df["is_flyable"].values.astype(np.float32)
     X_test_raw = test_df[feature_names].values.astype(np.float32)
     y_test = test_df["is_flyable"].values.astype(np.float32)
 
     # Extract region IDs and confidence weights
-    region_train = train_df["region_id"].values.astype(np.int64)
+    region_train = fit_df["region_id"].values.astype(np.int64)
+    region_val = val_df["region_id"].values.astype(np.int64)
     region_test = test_df["region_id"].values.astype(np.int64)
-    conf_train = train_df["label_confidence"].values.astype(np.float32)
+    conf_train = fit_df["label_confidence"].values.astype(np.float32)
+    conf_val = val_df["label_confidence"].values.astype(np.float32)
     conf_test = test_df["label_confidence"].values.astype(np.float32)
 
-    # Scale features
+    # Scale features (fit on training years only, never on val/test)
     if scaler is None:
         scaler = StandardScaler()
-        X_train = scaler.fit_transform(X_train_raw)
+        X_train = scaler.fit_transform(X_fit_raw)
     else:
-        X_train = scaler.transform(X_train_raw)
+        X_train = scaler.transform(X_fit_raw)
+    X_val = scaler.transform(X_val_raw)
     X_test = scaler.transform(X_test_raw)
-
-    # Train/val split
-    val_size = int(config.val_split * len(X_train))
-    indices = np.random.permutation(len(X_train))
-    val_idx, train_idx = indices[:val_size], indices[val_size:]
 
     # Create DataLoaders
     train_loader = DataLoader(
-        RegionalFlyableDataset(
-            X_train[train_idx],
-            y_train[train_idx],
-            region_train[train_idx],
-            conf_train[train_idx],
-        ),
+        RegionalFlyableDataset(X_train, y_train, region_train, conf_train),
         batch_size=config.batch_size,
         shuffle=True,
     )
     val_loader = DataLoader(
-        RegionalFlyableDataset(
-            X_train[val_idx],
-            y_train[val_idx],
-            region_train[val_idx],
-            conf_train[val_idx],
-        ),
+        RegionalFlyableDataset(X_val, y_val, region_val, conf_val),
+        batch_size=config.batch_size,
+    )
+    test_loader = DataLoader(
+        RegionalFlyableDataset(X_test, y_test, region_test, conf_test),
         batch_size=config.batch_size,
     )
 
-    print("Data splits:")
-    print(f"  Train: {len(train_idx)} samples")
-    print(f"  Val:   {len(val_idx)} samples")
+    print("Data splits (temporal):")
+    print(f"  Train: {len(X_train)} samples (years < {val_year})")
+    print(f"  Val:   {len(X_val)} samples (year == {val_year})")
     print(f"  Test:  {len(X_test)} samples")
 
     return (
         train_loader,
         val_loader,
+        test_loader,
         scaler,
-        X_train,
         y_train,
-        region_train,
-        conf_train,
+        X_val,
+        y_val,
+        region_val,
         X_test,
         y_test,
         region_test,
-        conf_test,
     )
 
 
@@ -1117,6 +1126,20 @@ class ExperimentSaver:
         """Save model state dict."""
         path = os.path.join(self.exp_dir, filename)
         torch.save(model.state_dict(), path)
+        return path
+
+    def save_scaler(self, scaler: StandardScaler, filename: str = "scaler.pkl") -> str:
+        """
+        Persist the fitted feature scaler next to the model.
+
+        Required for inference on new data (e.g. the FlyBeeper forecast pipeline):
+        without the exact training-time StandardScaler, raw GFS features are not
+        normalized the same way and predictions are meaningless.
+        """
+        import joblib
+
+        path = os.path.join(self.exp_dir, filename)
+        joblib.dump(scaler, path)
         return path
 
     def save_config(self, config: MultiRegionalConfig, results: Dict[str, Any]) -> str:
