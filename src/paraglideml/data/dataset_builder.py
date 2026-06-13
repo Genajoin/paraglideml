@@ -54,6 +54,59 @@ def compute_label_confidence(row: pd.Series) -> float:
             return 0.6  # Пограничный случай
 
 
+FORECAST_HOURS = (6, 12, 18)
+
+
+def compute_day_features(
+    cache: WeatherCache, cell_lat: int, cell_lon: int, date: pd.Timestamp
+) -> Optional[dict]:
+    """
+    Build the full feature record for one cell-day.
+
+    Loads the 06/12/18 UTC slices, uses 12 UTC as the anchor (full feature vector)
+    and appends the diurnal aggregates. Returns None if the 12 UTC anchor is
+    missing. Shared by the dataset builder (training) and the forecast/inference
+    path so both compute features identically.
+    """
+    samples = {h: cache.load_sample(cell_lat, cell_lon, date, h) for h in FORECAST_HOURS}
+    base = samples.get(12)
+    if not base:
+        return None
+
+    feats_by_hour = {h: s["features"] for h, s in samples.items() if s}
+
+    def _vals(key):
+        return [f[key] for f in feats_by_hour.values() if key in f]
+
+    record = dict(base["features"])
+
+    # Дневные максимумы опасного ветра/порывов и пиковой неустойчивости/CAPE
+    for src, dst in [
+        ("cape", "cape_daymax"),
+        ("wind_speed_850", "ws850_daymax"),
+        ("wind_speed_700", "ws700_daymax"),
+        ("gust_10m", "gust_daymax"),
+        ("lapse_low_mean", "lapse_low_daymax"),
+    ]:
+        vals = _vals(src)
+        record[dst] = max(vals) if vals else float(record.get(src, 0.0))
+
+    # Прирост CAPE с утра к полудню (накопление дневного прогрева)
+    cape_06 = feats_by_hour.get(6, {}).get("cape")
+    cape_12 = feats_by_hour.get(12, {}).get("cape")
+    record["cape_amp"] = (
+        (cape_12 - cape_06) if (cape_06 is not None and cape_12 is not None) else 0.0
+    )
+
+    # Сильнейший восходящий поток за день (наиболее отрицательная омега в нижнем слое)
+    omega_vals = _vals("omega_low_mean")
+    record["omega_low_min"] = (
+        min(omega_vals) if omega_vals else float(record.get("omega_low_mean", 0.0))
+    )
+
+    return record
+
+
 def build_cell_dataset(
     cell_id: str, df_flights: pd.DataFrame, cache: WeatherCache, min_xc_points: int = 10
 ) -> pd.DataFrame:
@@ -117,45 +170,14 @@ def build_cell_dataset(
     # Вычисляем confidence для каждой строки
     df_target["label_confidence"] = df_target.apply(compute_label_confidence, axis=1)
 
-    # Мержим с погодными данными.
-    # Берём три суточных среза (06/12/18 UTC) и формируем дневные агрегаты, чтобы
-    # отразить развитие термички и суточный максимум ветра. 12 UTC остаётся опорным
-    # снимком (полный вектор фич), к нему добавляются кросс-срезовые агрегаты.
-    HOURS = (6, 12, 18)
+    # Мержим с погодными данными: для каждого дня берём 06/12/18 UTC и собираем
+    # фичи через общую compute_day_features (та же логика в инференсе/forecast).
     weather_records = []
     for date in df_target["date"]:
-        samples = {h: cache.load_sample(cell_lat, cell_lon, date, h) for h in HOURS}
-        base = samples.get(12)
-        if not base:
-            continue  # требуем опорный срез 12 UTC
-
-        feats_by_hour = {h: s["features"] for h, s in samples.items() if s}
-
-        def _vals(key):
-            return [f[key] for f in feats_by_hour.values() if key in f]
-
-        record = dict(base["features"])
-
-        # Дневные максимумы опасного ветра/порывов и пиковой неустойчивости/CAPE
-        for src, dst in [
-            ("cape", "cape_daymax"),
-            ("wind_speed_850", "ws850_daymax"),
-            ("wind_speed_700", "ws700_daymax"),
-            ("gust_10m", "gust_daymax"),
-            ("lapse_low_mean", "lapse_low_daymax"),
-        ]:
-            vals = _vals(src)
-            record[dst] = max(vals) if vals else float(record.get(src, 0.0))
-
-        # Прирост CAPE с утра к полудню (накопление дневного прогрева)
-        cape_06 = feats_by_hour.get(6, {}).get("cape")
-        cape_12 = feats_by_hour.get(12, {}).get("cape")
-        record["cape_amp"] = (cape_12 - cape_06) if (cape_06 is not None and cape_12 is not None) else 0.0
-
-        # Сильнейший восходящий поток за день (наиболее отрицательная омега в нижнем слое)
-        omega_vals = _vals("omega_low_mean")
-        record["omega_low_min"] = min(omega_vals) if omega_vals else float(record.get("omega_low_mean", 0.0))
-
+        record = compute_day_features(cache, cell_lat, cell_lon, date)
+        if record is None:
+            continue  # нет опорного среза 12 UTC
+        record = dict(record)
         record["date"] = date
         weather_records.append(record)
 

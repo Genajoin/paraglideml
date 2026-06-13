@@ -246,6 +246,28 @@ def train_baseline(
         typer.echo(f"An error occurred during baseline training: {e}", err=True)
 
 
+@app.command("forecast")
+def forecast(
+    date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
+    experiment: Optional[str] = typer.Option(
+        None, "--experiment", help="Experiment name to load (default: latest NN with model.pth)"
+    ),
+):
+    """
+    Download GFS for a date, run the trained model, and print per-spot flyability.
+
+    Fetches only the needed GRIB messages (byte-range). v1 uses the 0.25 deg
+    analysis (real conditions for the date) — ideal for eyeballing the model
+    against a recent day.
+    """
+    from .predict import run_forecast
+
+    try:
+        run_forecast(date_str=date, experiment=experiment)
+    except Exception as e:
+        typer.echo(f"Forecast failed: {e}", err=True)
+
+
 # =============================================================================
 # ANALYZE COMMANDS
 # =============================================================================
