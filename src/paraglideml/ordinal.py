@@ -24,6 +24,7 @@ from typing import Dict, List
 
 import joblib
 import numpy as np
+import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.isotonic import IsotonicRegression
 from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
@@ -75,15 +76,33 @@ def _train_tier(fit_df, val_df, test_df, feature_names, good_km, broad_min, conf
 def run_ordinal_pipeline(
     experiments_dir: str = "models/experiments",
     broad_min: int = 5,
+    production: bool = False,
 ) -> str:
-    """Train calibrated cumulative tier models and save the ordinal trio."""
+    """
+    Train calibrated cumulative tier models and save the ordinal trio.
+
+    Default: honest temporal eval (fit<val, val, test=held-out year) — metrics are
+    a real out-of-sample test. With production=True: fit on ALL years (no holdout)
+    and calibrate on the most recent year — the deployment model for the bot. It has
+    no test set by construction; trust its quality via `train backtest` (the recipe's
+    mean across years). Printed AP/ROC in production mode are in-sample (optimistic).
+    """
     config = MultiRegionalConfig(experiments_dir=experiments_dir)
     train_df, test_df, feature_names, region_mapping = load_and_prepare_data(config)
 
-    val_year = int(train_df["year"].max())
-    fit_df = train_df[train_df["year"] < val_year].copy()
-    val_df = train_df[train_df["year"] == val_year].copy()
-    print(f"Ordinal tiers (broad_min={broad_min}); fit<{val_year}, val={val_year}, test=held-out")
+    if production:
+        all_df = pd.concat([train_df, test_df], ignore_index=True)
+        last_year = int(all_df["year"].max())
+        fit_df = all_df
+        val_df = all_df[all_df["year"] == last_year]  # isotonic calibration slice
+        test_df = val_df  # NOTE: in-sample; real quality is from `train backtest`
+        print(f"PRODUCTION ordinal: fit on ALL years {sorted(set(int(y) for y in all_df['year']))}, "
+              f"calibrate on {last_year}, NO holdout (quality via `train backtest`)")
+    else:
+        val_year = int(train_df["year"].max())
+        fit_df = train_df[train_df["year"] < val_year].copy()
+        val_df = train_df[train_df["year"] == val_year].copy()
+        print(f"Ordinal tiers (broad_min={broad_min}); fit<{val_year}, val={val_year}, test=held-out")
 
     tiers: Dict[str, dict] = {}
     for good_km, label in TIERS:
@@ -121,6 +140,8 @@ def run_ordinal_pipeline(
         "monotonicity_clamp_rate": raw_violation,
         "broad_min": broad_min,
         "num_features": len(feature_names),
+        "production": production,
+        "metrics_note": "in-sample (no holdout); see `train backtest`" if production else "held-out test year",
     }
     with open(os.path.join(exp_dir, "config.json"), "w") as f:
         json.dump(summary, f, indent=2, default=str)

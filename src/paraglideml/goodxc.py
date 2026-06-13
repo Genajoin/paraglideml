@@ -109,6 +109,78 @@ def _threshold_for_precision(
     return float(best_thr)
 
 
+def run_backtest(
+    tiers=(15.0, 50.0, 100.0),
+    broad_min: int = BROAD_MIN,
+    learning_rate: float = 0.05,
+    max_iter: int = 400,
+    max_leaf_nodes: int = 31,
+) -> pd.DataFrame:
+    """
+    Rolling-origin backtest: for each year Y (with prior data), fit the recipe on
+    ALL years < Y and score on Y. Estimates how the recipe generalizes to ANY unseen
+    season (not just one test year) — the confidence behind a production model that
+    is later trained on all years with no holdout. AP/ROC are threshold-free, so no
+    per-fold validation split is needed; GBM uses internal early stopping.
+    """
+    from .multiregional import MultiRegionalConfig, cluster_regions, feature_columns
+
+    config = MultiRegionalConfig()
+    df = pd.read_csv(config.data_path)
+    df["date"] = pd.to_datetime(df["date"])
+    df["year"] = df["date"].dt.year
+    region_mapping = cluster_regions(df, n_clusters=config.num_regions, random_state=config.random_seed)
+    df["region_id"] = df["cell_id"].map(region_mapping)
+    feats = feature_columns(df)
+    years = sorted(int(y) for y in df["year"].unique())
+    print(f"Rolling backtest over {years}  ({len(feats)} features, tiers {[int(t) for t in tiers]} km)")
+
+    rows = []
+    for Y in years[1:]:
+        train, test = df[df["year"] < Y], df[df["year"] == Y]
+        if len(test) == 0 or len(train) < 300:
+            continue
+        rec = {"year": Y, "n_test": int(len(test))}
+        for km in tiers:
+            tr = build_good_xc_target(train, km, broad_min)
+            te = build_good_xc_target(test, km, broad_min)
+            yv = te["good_xc"].values
+            if not (0 < int(yv.sum()) < len(yv)):
+                rec[f"ap{int(km)}"] = float("nan"); rec[f"roc{int(km)}"] = float("nan")
+                rec[f"base{int(km)}"] = float(yv.mean()); continue
+            clf = HistGradientBoostingClassifier(
+                learning_rate=learning_rate, max_iter=max_iter, max_leaf_nodes=max_leaf_nodes,
+                l2_regularization=1.0, early_stopping=True, validation_fraction=0.15,
+                random_state=config.random_seed,
+            )
+            clf.fit(tr[feats].values, tr["good_xc"].values, sample_weight=tr["good_confidence"].values)
+            p = clf.predict_proba(te[feats].values)[:, 1]
+            rec[f"ap{int(km)}"] = float(average_precision_score(yv, p))
+            rec[f"roc{int(km)}"] = float(roc_auc_score(yv, p))
+            rec[f"base{int(km)}"] = float(yv.mean())
+        rows.append(rec)
+
+    res = pd.DataFrame(rows)
+    tier_names = {15: "flyable", 50: "good", 100: "epic"}
+    print("\n=== Rolling backtest: AP (lift) per tier, by test year ===")
+    hdr = f"{'year':>5} {'n':>5} " + " ".join(f"{tier_names.get(int(t),int(t)):>16}" for t in tiers)
+    print(hdr)
+    for _, r in res.iterrows():
+        cells = []
+        for t in tiers:
+            k = int(t); ap = r[f"ap{k}"]; b = r[f"base{k}"]
+            cells.append(f"{ap:.3f}(x{ap/b:.2f})" if b > 0 and ap == ap else "   n/a   ")
+        print(f"{int(r.year):>5} {int(r.n_test):>5} " + " ".join(f"{c:>16}" for c in cells))
+    print("  mean AP:".ljust(12), end="")
+    for t in tiers:
+        k = int(t); print(f"{res[f'ap{k}'].mean():>16.3f}", end="")
+    print(f"\n  mean ROC: ", end="")
+    for t in tiers:
+        k = int(t); print(f"  {tier_names.get(k,k)} {res[f'roc{k}'].mean():.3f}", end="")
+    print()
+    return res
+
+
 def run_goodxc_pipeline(
     experiments_dir: str = "models/experiments",
     good_km: float = GOOD_KM,

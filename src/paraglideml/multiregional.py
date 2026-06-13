@@ -388,6 +388,38 @@ def cluster_regions(
     return region_mapping
 
 
+# Columns that are never model features. NOTE: is_weekend and day_of_year are
+# dropped on purpose — calendar artifacts of the labeling process (more pilots fly
+# on weekends), not weather, which leaked a "weekend -> flyable" shortcut. The
+# dist_*/pts_* aggregates ARE the label signal for the distance target — never inputs.
+DROP_COLS = [
+    "date",
+    "year",
+    "flight_count",
+    "is_flyable",
+    "cell_id",
+    "cell_lat",
+    "cell_lon",
+    "label_confidence",
+    "region_id",
+    "is_weekend",
+    "day_of_year",
+    "dist_max",
+    "dist_mean",
+    "dist_sum",
+    "pts_max",
+    # good_xc target machinery (added by build_good_xc_target) — also never inputs.
+    "good_xc",
+    "good_confidence",
+    "region_n_good",
+]
+
+
+def feature_columns(df: pd.DataFrame) -> List[str]:
+    """Model feature columns = all columns except labels/ids/outcomes (DROP_COLS)."""
+    return [c for c in df.columns if c not in DROP_COLS]
+
+
 def load_and_prepare_data(
     config: MultiRegionalConfig, data_path: Optional[str] = None
 ) -> Tuple[pd.DataFrame, pd.DataFrame, List[str], Dict[str, int]]:
@@ -446,31 +478,8 @@ def load_and_prepare_data(
     print(f"  Train balance: {train_df['is_flyable'].mean():.1%} flyable")
     print(f"  Test balance:  {test_df['is_flyable'].mean():.1%} flyable")
 
-    # Extract feature names.
-    # NOTE: is_weekend and day_of_year are dropped on purpose. They are calendar
-    # artifacts of the labeling process (more pilots fly on weekends), not weather,
-    # and leaked the "weekend -> flyable" shortcut into the model. is_weekend stays
-    # available for the label-confidence logic only, never as a predictor.
-    drop_cols = [
-        "date",
-        "year",
-        "flight_count",
-        "is_flyable",
-        "cell_id",
-        "cell_lat",
-        "cell_lon",
-        "label_confidence",
-        "region_id",
-        "is_weekend",
-        "day_of_year",
-        # Flight-outcome aggregates (distance/points). These ARE the label signal
-        # for the distance-based "good XC day" target — never feed them as inputs.
-        "dist_max",
-        "dist_mean",
-        "dist_sum",
-        "pts_max",
-    ]
-    feature_names = [c for c in df.columns if c not in drop_cols]
+    # Extract feature names (shared definition: see DROP_COLS / feature_columns).
+    feature_names = feature_columns(df)
     print(f"  Features: {len(feature_names)}")
 
     return train_df, test_df, feature_names, region_mapping

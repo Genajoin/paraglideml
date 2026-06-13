@@ -310,6 +310,26 @@ def train_goodxc(
         typer.echo(f"An error occurred during good-xc training: {e}", err=True)
 
 
+@train_app.command("backtest")
+def train_backtest(
+    broad_min: int = typer.Option(5, help="Regional-consensus broad threshold"),
+):
+    """
+    Rolling-origin backtest of the good-XC recipe: for each year, fit on all prior
+    years and score on that year. Reports AP/ROC per tier per year + the mean — an
+    estimate of how the recipe generalizes to any unseen season.
+    """
+    from .goodxc import run_backtest
+
+    print("Starting rolling backtest...")
+    try:
+        run_backtest(broad_min=broad_min)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during backtest: {e}", err=True)
+
+
 @train_app.command("ordinal")
 def train_ordinal(
     experiments_dir: str = typer.Option(
@@ -317,6 +337,10 @@ def train_ordinal(
     ),
     broad_min: int = typer.Option(
         5, help="Cells in a region reaching a tier for the day to count as broadly good"
+    ),
+    production: bool = typer.Option(
+        False, "--production", help="Fit on ALL years (no holdout) for deployment; "
+        "quality is estimated via `train backtest`, not a held-out test"
     ),
 ):
     """
@@ -329,7 +353,9 @@ def train_ordinal(
 
     print("Starting ordinal tier pipeline...")
     try:
-        exp_path = run_ordinal_pipeline(experiments_dir=experiments_dir, broad_min=broad_min)
+        exp_path = run_ordinal_pipeline(
+            experiments_dir=experiments_dir, broad_min=broad_min, production=production
+        )
         print(f"\nOrdinal pipeline finished. Experiment saved to: {exp_path}")
     except FileNotFoundError as e:
         typer.echo(f"Error: {e}", err=True)
