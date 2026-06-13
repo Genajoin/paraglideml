@@ -222,6 +222,7 @@ def train_baseline(
     ),
     learning_rate: float = typer.Option(0.05, help="Gradient boosting learning rate"),
     max_iter: int = typer.Option(400, help="Max boosting iterations (trees)"),
+    max_leaf_nodes: int = typer.Option(31, help="Max leaf nodes per tree (capacity)"),
 ):
     """
     Train a gradient-boosted baseline (HistGradientBoostingClassifier) on the same
@@ -235,6 +236,7 @@ def train_baseline(
             experiments_dir=experiments_dir,
             learning_rate=learning_rate,
             max_iter=max_iter,
+            max_leaf_nodes=max_leaf_nodes,
         )
         print(f"\nBaseline finished. Experiment saved to: {exp_path}")
     except FileNotFoundError as e:

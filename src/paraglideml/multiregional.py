@@ -645,10 +645,12 @@ class MultiRegionalTrainer:
             # Forward pass
             y_pred = self.model(X_batch, region_batch)
 
-            # Compute loss
+            # Compute loss. Normalize the confidence-weighted loss by the sum of
+            # weights (a proper weighted mean), not by sample count — otherwise
+            # batches with many low-confidence samples are silently down-scaled.
             if self.config.use_confidence_weighting:
                 loss_per_sample = self.criterion(y_pred, y_batch)
-                loss = (loss_per_sample * conf_batch).mean()
+                loss = (loss_per_sample * conf_batch).sum() / conf_batch.sum().clamp(min=1e-8)
             else:
                 loss = self.criterion(y_pred, y_batch)
 
@@ -671,7 +673,7 @@ class MultiRegionalTrainer:
 
                 if self.config.use_confidence_weighting:
                     loss_per_sample = self.criterion(y_pred, y_batch)
-                    loss = (loss_per_sample * conf_batch).mean()
+                    loss = (loss_per_sample * conf_batch).sum() / conf_batch.sum().clamp(min=1e-8)
                 else:
                     loss = self.criterion(y_pred, y_batch)
 
@@ -695,6 +697,11 @@ class MultiRegionalTrainer:
         """
         epochs_no_improve = 0
 
+        # Halve the LR when validation loss plateaus (well before early-stop fires).
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer, mode="min", factor=0.5, patience=8
+        )
+
         if verbose:
             print(
                 f"Training for max {self.config.epochs} epochs (patience={self.config.patience})..."
@@ -706,6 +713,7 @@ class MultiRegionalTrainer:
             # Train and validate
             train_loss = self.train_epoch(train_loader)
             val_loss = self.validate(val_loader)
+            scheduler.step(val_loss)
 
             # Record history
             self.history["train_loss"].append(train_loss)
