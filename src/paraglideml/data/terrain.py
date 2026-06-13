@@ -1,19 +1,21 @@
 """
-Spot-centric terrain features (launch-point elevation & mountainess).
+Spot-centric terrain & slope-orientation features from FlyBeeper spot files.
 
-The weather features are extracted at the 1° cell, but a cell's *flying* happens at
-the launch sites, which can sit on a mountain edge while the cell as a whole is mostly
-plain (e.g. cell 45_11: centre ~80 m / mountainess 0.31, but the launch centroid is at
-~680 m / mountainess 1.0). Feeding cell-centre terrain would mislabel such cells as
-flat. So we anchor terrain at the **launch centroid** — the median takeoff coordinate
-of the cell's quality flights — and read elevation + mountainess there.
+Launch-site data is *known*, so we don't sample a DEM raster: FlyBeeper's
+``dhv_loc.geojson`` gives per-site altitude and flying directions, and
+``takeoff.geojson`` gives 8-way launch-orientation flags. Per cell we aggregate:
 
-This is a one-time extraction (`paraglideml data terrain`) that reads the heavy
-elevation raster once and writes a small per-cell JSON. The dataset builder and the
-forecast path consume only that JSON, so neither needs rasterio at runtime.
+  elevation      median altitude of the cell's launch sites (real, not cell-mean)
+  mountainess    altitude spread (p90-p10)/1000, clamped — relief proxy from sites
+  orientations   8-vector: fraction of sites launchable at N,NE,E,SE,S,SW,W,NW
 
-Mountainess follows the archive definition: sample a grid in a radius around the
-point, mountainess = clamp((max_elev - min_elev) / 800, 0, 1).
+The orientations unlock a physical, *dynamic* flyability feature: given the forecast
+wind, is there a launch facing into it? `slope_wind_alignment` scores how well the
+low-level wind blows onto an available slope — the exact thing that decides whether a
+windy day is flyable only off certain aspects (or not at all).
+
+`data terrain` writes the small data/processed/cell_terrain.json that the dataset
+builder and forecast path consume; the source geojson is read only here.
 """
 
 import json
@@ -21,117 +23,152 @@ import math
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import pandas as pd
+import numpy as np
 
-from ..config import CELL_TERRAIN_PATH, ELEVATION_TIF, FLIGHTS_DIR, PROCESSED_DATA_DIR
-from .flight_parsing import load_flights_to_dataframe
+from ..config import CELL_TERRAIN_PATH, FLYBEEPER_SITES_DIR, PROCESSED_DATA_DIR
+
+# Orientation order: index k -> compass bearing k*45 (N, NE, E, SE, S, SW, W, NW).
+ORIENTATIONS = [0, 45, 90, 135, 180, 225, 270, 315]
+# dhv directionsText tokens (German/intl) -> orientation index.
+_DIR_TOKEN = {"N": 0, "NO": 1, "NE": 1, "O": 2, "E": 2, "SO": 3, "SE": 3,
+              "S": 4, "SW": 5, "W": 6, "NW": 7}
 
 
-class GeoTiffElevation:
-    """Minimal GeoTIFF elevation sampler (elevation + mountainess)."""
+def _cell_of(lat: float, lon: float) -> str:
+    return f"{int(math.floor(lat))}_{int(math.floor(lon))}"
 
-    def __init__(self, tif_path: Path):
-        import rasterio  # local import: only the terrain extraction needs rasterio
 
-        self._rio = rasterio
-        self.ds = rasterio.open(tif_path)
-        self.nodata = self.ds.nodata
+def _takeoff_orientations(props: dict) -> set:
+    """Orientation indices flagged launchable in a takeoff.geojson feature."""
+    out = set()
+    for k, bearing in enumerate(ORIENTATIONS):
+        if str(props.get(f"{bearing:03d}_Launch", "0")) == "1":
+            out.add(k)
+    return out
 
-    def elevation(self, lat: float, lon: float) -> Optional[float]:
-        from rasterio.transform import rowcol
-        from rasterio.windows import Window
 
-        row, col = rowcol(self.ds.transform, lon, lat)
-        if not (0 <= row < self.ds.height and 0 <= col < self.ds.width):
-            return None
-        val = self.ds.read(1, window=Window(col, row, 1, 1))
-        if val.size == 0:
-            return None
-        e = float(val[0, 0])
-        if self.nodata is not None and e == self.nodata:
-            return None
-        return e
+def _dhv_orientations(directions_text: Optional[str]) -> set:
+    """Orientation indices parsed from a dhv directionsText like 'O, W'."""
+    out = set()
+    if not directions_text:
+        return out
+    for tok in str(directions_text).replace(";", ",").split(","):
+        idx = _DIR_TOKEN.get(tok.strip().upper())
+        if idx is not None:
+            out.add(idx)
+    return out
 
-    def mountainess(self, lat: float, lon: float, grid_size: int = 5, radius_km: float = 5.0) -> float:
-        km_per_deg_lat = 111.0
-        km_per_deg_lon = 111.0 * math.cos(math.radians(lat))
-        step_lat = (radius_km * 2) / (grid_size - 1) / km_per_deg_lat
-        step_lon = (radius_km * 2) / (grid_size - 1) / km_per_deg_lon
-        start_lat = lat - radius_km / km_per_deg_lat
-        start_lon = lon - radius_km / km_per_deg_lon
-        elevs: List[float] = []
-        for i in range(grid_size):
-            for j in range(grid_size):
-                e = self.elevation(start_lat + i * step_lat, start_lon + j * step_lon)
-                if e is not None:
-                    elevs.append(e)
-        if not elevs:
-            return 0.0
-        return max(0.0, min(1.0, (max(elevs) - min(elevs)) / 800.0))
 
-    def close(self):
-        self.ds.close()
+def slope_wind_alignment(u: float, v: float, orientations: Optional[List[float]]):
+    """
+    Score how well the wind blows onto an available launch slope.
+
+    NOTE: empirically dormant. Adding this as a model feature gave only +0.003 AP
+    over known heights on the good_xc target — GFS surface wind is too coarse and
+    many launches are sheltered by terrain behind them, so the score is noisy.
+    Kept for a future, finer wind source (e.g. higher-res model or ridge-level u/v).
+
+    A slope facing bearing theta is soarable when the wind comes FROM theta. With
+    u,v (eastward/northward m/s) the meteorological from-direction is
+    atan2(-u,-v). Returns (alignment, aligned_speed):
+      alignment    max over orientations of cos(from_dir - theta) weighted by the
+                   fraction of sites offering that aspect (in [0,1])
+      aligned_speed alignment * wind speed (a soarable-into-slope wind magnitude)
+    """
+    if not orientations:
+        return 0.0, 0.0
+    speed = math.hypot(u, v)
+    if speed < 1e-6:
+        return 0.0, 0.0
+    from_dir = math.degrees(math.atan2(-u, -v)) % 360.0
+    best = 0.0
+    for k, frac in enumerate(orientations):
+        if frac <= 0:
+            continue
+        align = math.cos(math.radians(from_dir - ORIENTATIONS[k]))
+        best = max(best, align * frac)
+    best = max(0.0, best)
+    return best, best * speed
 
 
 def build_cell_terrain(
     selected_cells_path: Optional[str] = None,
-    flights_dir: Optional[str] = None,
-    elevation_tif: Optional[str] = None,
+    sites_dir: Optional[str] = None,
     output_path: Optional[str] = None,
-    min_xc_points: int = 10,
 ) -> Dict[str, dict]:
     """
-    Compute launch-centroid elevation & mountainess per selected cell -> JSON.
+    Aggregate FlyBeeper launch sites into per-cell terrain & orientation -> JSON.
 
-    For each cell, the launch centroid is the median takeoff coordinate over the
-    cell's quality flights; terrain is sampled there (falling back to the cell
-    centre if a cell has no geolocated flights).
+    For each selected cell: elevation (median site altitude), mountainess (altitude
+    spread), and an 8-way orientation availability vector. Uses dhv_loc.geojson
+    (altitude + directions) and takeoff.geojson (orientation flags).
     """
     selected_cells_path = selected_cells_path or str(PROCESSED_DATA_DIR / "selected_cells.json")
-    flights_dir = flights_dir or str(FLIGHTS_DIR)
-    elevation_tif = elevation_tif or str(ELEVATION_TIF)
+    sites_dir = sites_dir or str(FLYBEEPER_SITES_DIR)
     output_path = output_path or str(CELL_TERRAIN_PATH)
 
     cells: List[str] = json.loads(Path(selected_cells_path).read_text())
-    print(f"Computing terrain for {len(cells)} cells from {Path(elevation_tif).name} ...")
+    cellset = set(cells)
+    sdir = Path(sites_dir)
 
-    df = load_flights_to_dataframe(data_dir=flights_dir).dropna(subset=["takeoff_lat", "takeoff_lon"])
-    if min_xc_points > 0:
-        df = df[df["points"] >= min_xc_points]
+    # Collect per-cell altitudes and per-site orientation sets.
+    alts: Dict[str, List[float]] = {c: [] for c in cells}
+    orient_hits: Dict[str, np.ndarray] = {c: np.zeros(8) for c in cells}
+    orient_sites: Dict[str, int] = {c: 0 for c in cells}
 
-    reader = GeoTiffElevation(Path(elevation_tif))
+    dhv = json.loads((sdir / "dhv_loc.geojson").read_text())
+    dhv_feats = dhv["features"] if isinstance(dhv, dict) else dhv
+    for f in dhv_feats:
+        lon, lat = f["geometry"]["coordinates"][:2]
+        c = _cell_of(lat, lon)
+        if c not in cellset:
+            continue
+        p = f["properties"]
+        if p.get("altitude") is not None:
+            alts[c].append(float(p["altitude"]))
+        o = _dhv_orientations(p.get("directionsText"))
+        if o:
+            for k in o:
+                orient_hits[c][k] += 1
+            orient_sites[c] += 1
+
+    take = json.loads((sdir / "takeoff.geojson").read_text())
+    take_feats = take["features"] if isinstance(take, dict) else take
+    for f in take_feats:
+        lon, lat = f["geometry"]["coordinates"][:2]
+        c = _cell_of(lat, lon)
+        if c not in cellset:
+            continue
+        o = _takeoff_orientations(f["properties"])
+        if o:
+            for k in o:
+                orient_hits[c][k] += 1
+            orient_sites[c] += 1
+
     terrain: Dict[str, dict] = {}
-    try:
-        for cell in cells:
-            lat, lon = map(int, cell.split("_"))
-            cc_lat, cc_lon = lat + 0.5, lon + 0.5
-            sub = df[
-                df["takeoff_lat"].between(cc_lat - 0.5, cc_lat + 0.5)
-                & df["takeoff_lon"].between(cc_lon - 0.5, cc_lon + 0.5)
-            ]
-            if len(sub):
-                launch_lat = float(sub["takeoff_lat"].median())
-                launch_lon = float(sub["takeoff_lon"].median())
-                source = "launch_centroid"
-            else:
-                launch_lat, launch_lon, source = cc_lat, cc_lon, "cell_center_fallback"
-
-            elev = reader.elevation(launch_lat, launch_lon)
-            terrain[cell] = {
-                "launch_lat": launch_lat,
-                "launch_lon": launch_lon,
-                "elevation": float(elev) if elev is not None else 0.0,
-                "mountainess": float(reader.mountainess(launch_lat, launch_lon)),
-                "n_flights": int(len(sub)),
-                "source": source,
-            }
-    finally:
-        reader.close()
+    for c in cells:
+        a = np.array(alts[c], dtype=float)
+        if a.size:
+            elevation = float(np.median(a))
+            spread = float(np.percentile(a, 90) - np.percentile(a, 10)) if a.size >= 5 else float(a.max() - a.min())
+            mountainess = max(0.0, min(1.0, spread / 1000.0))
+        else:
+            elevation, mountainess = 0.0, 0.0
+        n = orient_sites[c]
+        orientations = (orient_hits[c] / n).tolist() if n else [0.0] * 8
+        terrain[c] = {
+            "elevation": elevation,
+            "mountainess": mountainess,
+            "orientations": orientations,
+            "n_alt_sites": int(a.size),
+            "n_orient_sites": int(n),
+        }
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     Path(output_path).write_text(json.dumps(terrain, indent=2))
-    n_fallback = sum(1 for v in terrain.values() if v["source"] != "launch_centroid")
-    print(f"✓ Terrain for {len(terrain)} cells -> {output_path} ({n_fallback} cell-center fallbacks)")
+    empty = [c for c, v in terrain.items() if v["n_alt_sites"] == 0]
+    print(f"✓ Terrain for {len(terrain)} cells -> {output_path}"
+          + (f"  ({len(empty)} cells без спотов: {empty})" if empty else ""))
     return terrain
 
 
@@ -141,3 +178,18 @@ def load_cell_terrain(path: Optional[str] = None) -> Optional[Dict[str, dict]]:
     if not p.exists():
         return None
     return json.loads(p.read_text())
+
+
+def add_terrain_features(rec: dict, terrain_cell: Optional[dict]) -> dict:
+    """
+    Add static spot-centric terrain (known elevation/mountainess) to a record.
+
+    Shared by the dataset builder and the forecast path so both compute identically.
+    Slope-wind features are intentionally NOT added (see slope_wind_alignment: they
+    tested as negligible on GFS winds).
+    """
+    if not terrain_cell:
+        return rec
+    rec["elevation"] = float(terrain_cell.get("elevation", 0.0))
+    rec["mountainess"] = float(terrain_cell.get("mountainess", 0.0))
+    return rec

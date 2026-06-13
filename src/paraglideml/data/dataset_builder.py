@@ -213,12 +213,13 @@ def build_cell_dataset(
     dataset["cell_lon"] = cell_lon
     dataset["day_of_year"] = dataset["date"].dt.dayofyear
 
-    # Спот-центричный террейн (высота/горность в точке старта) — статичные фичи
-    # ячейки. Это ФИЧИ модели (рельеф, не исход), грузятся из cell_terrain.json,
-    # если он построен (`paraglideml data terrain`); иначе колонки не добавляются.
+    # Спот-центричный террейн (фичи модели, не исход): известные высота/горность из
+    # cell_terrain.json (`paraglideml data terrain`). Slope-wind НЕ добавляем —
+    # на GFS-ветре прирост в пределах шума (см. terrain.slope_wind_alignment).
     if cell_terrain and cell_id in cell_terrain:
-        dataset["elevation"] = float(cell_terrain[cell_id]["elevation"])
-        dataset["mountainess"] = float(cell_terrain[cell_id]["mountainess"])
+        tc = cell_terrain[cell_id]
+        dataset["elevation"] = float(tc.get("elevation", 0.0))
+        dataset["mountainess"] = float(tc.get("mountainess", 0.0))
 
     return dataset
 

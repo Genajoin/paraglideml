@@ -26,7 +26,7 @@ import torch
 from .config import EXPERIMENTS_DIR, GFS_CACHE_DIR, GFS_FORECAST_DIR, PROCESSED_DATA_DIR
 from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import PRESSURE_LEVELS, run_gfs_cache_creation
-from .data.terrain import load_cell_terrain
+from .data.terrain import add_terrain_features, load_cell_terrain
 from .data.weather_cache import WeatherCache
 from .multiregional import MultiRegionalModel
 
@@ -174,14 +174,11 @@ def _fetch_and_extract(date_str: str, grib_root: Path) -> None:
 def _feature_vector(rec: dict, feature_names: List[str], terrain_cell: Optional[dict]) -> np.ndarray:
     """Build the model input row, injecting spot-centric terrain features.
 
-    compute_day_features returns weather only; elevation/mountainess are static
-    per-cell and must be supplied from cell_terrain.json at inference, exactly as
-    the dataset builder merges them at training time.
+    compute_day_features returns weather only; elevation/mountainess/slope-wind are
+    supplied from cell_terrain.json at inference via the same add_slope_features the
+    dataset builder uses at training time (otherwise they'd read as 0.0).
     """
-    rec = dict(rec)
-    if terrain_cell:
-        rec.setdefault("elevation", float(terrain_cell.get("elevation", 0.0)))
-        rec.setdefault("mountainess", float(terrain_cell.get("mountainess", 0.0)))
+    rec = add_terrain_features(dict(rec), terrain_cell)
     return np.array([[float(rec.get(f, 0.0)) for f in feature_names]], dtype=np.float32)
 
 

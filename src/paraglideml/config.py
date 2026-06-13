@@ -38,9 +38,16 @@ GFS_FORECAST_DIR = Path(os.getenv("PARAGLIDEML_FORECAST_GRIB_DIR", GFS_DIR / "fo
 PROCESSED_DATA_DIR = Path(os.getenv("PARAGLIDEML_PROCESSED_DATA_DIR", DATA_DIR / "processed"))
 FLIGHTS_DIR = Path(os.getenv("PARAGLIDEML_FLIGHTS_DIR", DATA_DIR / "flights"))
 
-# Elevation GeoTIFF for spot-centric terrain features (launch-point elevation /
-# mountainess). Default is the global ETOPO 2022 raster from the Paraglidable
-# archive (~1.8 km, full coverage); override with a finer SRTM mosaic if available.
+# FlyBeeper spot files: known launch-site elevations and slope orientations.
+# These supply spot-centric terrain (no raster needed): dhv_loc.geojson has per-site
+# altitude + flying directions; takeoff.geojson has 8-way launch-orientation flags.
+FLYBEEPER_SITES_DIR = Path(
+    os.getenv(
+        "PARAGLIDEML_FLYBEEPER_SITES_DIR",
+        "/home/gena/dev/FlyBeeper/APP/flybeeper-dev-env/legacy/228 FlyBeeperMap/public_html/map/json",
+    )
+)
+# Optional elevation GeoTIFF fallback (e.g. ETOPO) for cells with no known spots.
 ELEVATION_TIF = Path(
     os.getenv(
         "PARAGLIDEML_ELEVATION_TIF",
@@ -48,7 +55,7 @@ ELEVATION_TIF = Path(
     )
 )
 # Per-cell terrain table produced by `paraglideml data terrain` (small JSON; the
-# training/inference path reads this, never the heavy raster).
+# training/inference path reads this, never the source spot files).
 CELL_TERRAIN_PATH = Path(
     os.getenv("PARAGLIDEML_CELL_TERRAIN", str(PROCESSED_DATA_DIR / "cell_terrain.json"))
 )
