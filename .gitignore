@@ -50,6 +50,7 @@ Thumbs.db
 # Data & Models
 /data/gfs/anl
 /data/gfs/cache/cells/
+/data/gfs/forecast_grib/
 /data/flights/*.json
 /data/processed/
 /models/

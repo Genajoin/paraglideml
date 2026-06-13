@@ -31,8 +31,34 @@ DATA_DIR = Path(os.getenv("PARAGLIDEML_DATA_DIR", PROJECT_ROOT / "data"))
 GFS_DIR = Path(os.getenv("PARAGLIDEML_GFS_DIR", DATA_DIR / "gfs"))
 GFS_ANL_DIR = Path(os.getenv("PARAGLIDEML_GFS_ANL_DIR", GFS_DIR / "anl"))
 GFS_CACHE_DIR = Path(os.getenv("PARAGLIDEML_GFS_CACHE_DIR", GFS_DIR / "cache"))
+# Landing dir for on-demand forecast/inference GRIB downloads. Small samples stay
+# on fast local storage (NVMe); point this at a large/slow disk (HDD) for big
+# history backfills via PARAGLIDEML_FORECAST_GRIB_DIR or the --grib-dir flag.
+GFS_FORECAST_DIR = Path(os.getenv("PARAGLIDEML_FORECAST_GRIB_DIR", GFS_DIR / "forecast_grib"))
 PROCESSED_DATA_DIR = Path(os.getenv("PARAGLIDEML_PROCESSED_DATA_DIR", DATA_DIR / "processed"))
 FLIGHTS_DIR = Path(os.getenv("PARAGLIDEML_FLIGHTS_DIR", DATA_DIR / "flights"))
+
+# FlyBeeper spot files: known launch-site elevations and slope orientations.
+# These supply spot-centric terrain (no raster needed): dhv_loc.geojson has per-site
+# altitude + flying directions; takeoff.geojson has 8-way launch-orientation flags.
+FLYBEEPER_SITES_DIR = Path(
+    os.getenv(
+        "PARAGLIDEML_FLYBEEPER_SITES_DIR",
+        "/home/gena/dev/FlyBeeper/APP/flybeeper-dev-env/legacy/228 FlyBeeperMap/public_html/map/json",
+    )
+)
+# Optional elevation GeoTIFF fallback (e.g. ETOPO) for cells with no known spots.
+ELEVATION_TIF = Path(
+    os.getenv(
+        "PARAGLIDEML_ELEVATION_TIF",
+        "/home/gena/archive/dev/Paraglidable/data/elevation/ETOPO_2022_v1_60s_N90W180_bed.tif",
+    )
+)
+# Per-cell terrain table produced by `paraglideml data terrain` (small JSON; the
+# training/inference path reads this, never the source spot files).
+CELL_TERRAIN_PATH = Path(
+    os.getenv("PARAGLIDEML_CELL_TERRAIN", str(PROCESSED_DATA_DIR / "cell_terrain.json"))
+)
 
 MODELS_DIR = Path(os.getenv("PARAGLIDEML_MODELS_DIR", PROJECT_ROOT / "models"))
 EXPERIMENTS_DIR = Path(os.getenv("PARAGLIDEML_EXPERIMENTS_DIR", MODELS_DIR / "experiments"))

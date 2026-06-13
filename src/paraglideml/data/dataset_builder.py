@@ -54,8 +54,67 @@ def compute_label_confidence(row: pd.Series) -> float:
             return 0.6  # Пограничный случай
 
 
+FORECAST_HOURS = (6, 12, 18)
+
+
+def compute_day_features(
+    cache: WeatherCache, cell_lat: int, cell_lon: int, date: pd.Timestamp
+) -> Optional[dict]:
+    """
+    Build the full feature record for one cell-day.
+
+    Loads the 06/12/18 UTC slices, uses 12 UTC as the anchor (full feature vector)
+    and appends the diurnal aggregates. Returns None if the 12 UTC anchor is
+    missing. Shared by the dataset builder (training) and the forecast/inference
+    path so both compute features identically.
+    """
+    samples = {h: cache.load_sample(cell_lat, cell_lon, date, h) for h in FORECAST_HOURS}
+    base = samples.get(12)
+    if not base:
+        return None
+
+    feats_by_hour = {h: s["features"] for h, s in samples.items() if s}
+
+    def _vals(key):
+        return [f[key] for f in feats_by_hour.values() if key in f]
+
+    record = dict(base["features"])
+
+    # Дневные максимумы опасного ветра/порывов и пиковой неустойчивости/CAPE
+    for src, dst in [
+        ("cape", "cape_daymax"),
+        ("wind_speed_850", "ws850_daymax"),
+        ("wind_speed_700", "ws700_daymax"),
+        ("gust_10m", "gust_daymax"),
+        ("lapse_low_mean", "lapse_low_daymax"),
+    ]:
+        vals = _vals(src)
+        record[dst] = max(vals) if vals else float(record.get(src, 0.0))
+
+    # Прирост CAPE с утра к полудню (накопление дневного прогрева)
+    cape_06 = feats_by_hour.get(6, {}).get("cape")
+    cape_12 = feats_by_hour.get(12, {}).get("cape")
+    record["cape_amp"] = (
+        (cape_12 - cape_06) if (cape_06 is not None and cape_12 is not None) else 0.0
+    )
+
+    # Сильнейший восходящий поток за день (наиболее отрицательная омега в нижнем слое)
+    omega_vals = _vals("omega_low_mean")
+    record["omega_low_min"] = (
+        min(omega_vals) if omega_vals else float(record.get("omega_low_mean", 0.0))
+    )
+
+    return record
+
+
 def build_cell_dataset(
-    cell_id: str, df_flights: pd.DataFrame, cache: WeatherCache, min_xc_points: int = 10
+    cell_id: str,
+    df_flights: pd.DataFrame,
+    cache: WeatherCache,
+    min_xc_points: int = 10,
+    cell_terrain: Optional[dict] = None,
+    available_years: Optional[List[int]] = None,
+    data_max_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Создаёт датасет для одной ячейки.
@@ -93,17 +152,38 @@ def build_cell_dataset(
         if len(df_cell) == 0:
             return pd.DataFrame()
 
-    # Агрегация по дням
+    # Агрегация по дням. Кроме счётчика полётов сохраняем дневные агрегаты
+    # дистанции/очков XContest — это сырьё для distance-цели «хороший XC-день»
+    # (см. target-methodology). Эти колонки НЕ используются как фичи модели
+    # (они — исход, не предиктор) и исключаются в multiregional.drop_cols.
     df_cell["date_only"] = pd.to_datetime(df_cell["date"]).dt.tz_localize(None).dt.normalize()
-    daily_flights = df_cell.groupby("date_only").agg(flight_count=("id", "count")).reset_index()
+    daily_flights = (
+        df_cell.groupby("date_only")
+        .agg(
+            flight_count=("id", "count"),
+            dist_max=("distance", "max"),
+            dist_mean=("distance", "mean"),
+            dist_sum=("distance", "sum"),
+            pts_max=("points", "max"),
+        )
+        .reset_index()
+    )
     daily_flights.rename(columns={"date_only": "date"}, inplace=True)
 
-    # Создаём target timeline (15 мая - 15 сентября)
+    # Создаём target timeline (сезон 15 мая - 15 сентября). Для текущего/частичного
+    # года обрезаем конец по последней дате данных — иначе будущие дни без полётов
+    # стали бы ложными «нелётными» нулями.
+    if available_years is None:
+        available_years = [2021, 2022, 2023, 2024, 2025]
     target_dates = []
-    available_years = [2021, 2022, 2023, 2024, 2025]
     for y in available_years:
-        rng = pd.date_range(f"{y}-05-15", f"{y}-09-15")
-        target_dates.extend(rng)
+        season_start = pd.Timestamp(f"{y}-05-15")
+        season_end = pd.Timestamp(f"{y}-09-15")
+        if data_max_date is not None:
+            season_end = min(season_end, pd.Timestamp(data_max_date))
+        if season_start > season_end:
+            continue
+        target_dates.extend(pd.date_range(season_start, season_end))
 
     df_target = pd.DataFrame({"date": target_dates})
     df_target["date"] = pd.to_datetime(df_target["date"]).dt.normalize()
@@ -117,14 +197,16 @@ def build_cell_dataset(
     # Вычисляем confidence для каждой строки
     df_target["label_confidence"] = df_target.apply(compute_label_confidence, axis=1)
 
-    # Мержим с погодными данными
+    # Мержим с погодными данными: для каждого дня берём 06/12/18 UTC и собираем
+    # фичи через общую compute_day_features (та же логика в инференсе/forecast).
     weather_records = []
     for date in df_target["date"]:
-        sample = cache.load_sample(cell_lat, cell_lon, date, 12)
-        if sample:
-            features = sample["features"]
-            features["date"] = date
-            weather_records.append(features)
+        record = compute_day_features(cache, cell_lat, cell_lon, date)
+        if record is None:
+            continue  # нет опорного среза 12 UTC
+        record = dict(record)
+        record["date"] = date
+        weather_records.append(record)
 
     if not weather_records:
         return pd.DataFrame()
@@ -140,6 +222,14 @@ def build_cell_dataset(
     dataset["cell_lat"] = cell_lat
     dataset["cell_lon"] = cell_lon
     dataset["day_of_year"] = dataset["date"].dt.dayofyear
+
+    # Спот-центричный террейн (фичи модели, не исход): известные высота/горность из
+    # cell_terrain.json (`paraglideml data terrain`). Slope-wind НЕ добавляем —
+    # на GFS-ветре прирост в пределах шума (см. terrain.slope_wind_alignment).
+    if cell_terrain and cell_id in cell_terrain:
+        tc = cell_terrain[cell_id]
+        dataset["elevation"] = float(tc.get("elevation", 0.0))
+        dataset["mountainess"] = float(tc.get("mountainess", 0.0))
 
     return dataset
 
@@ -178,11 +268,30 @@ def build_multicell_dataset(
     print("Инициализирую weather cache...")
     cache = WeatherCache(cache_root=cache_root)
 
+    # Спот-центричный террейн (если построен) — добавит фичи elevation/mountainess.
+    from .terrain import load_cell_terrain
+
+    cell_terrain = load_cell_terrain()
+    if cell_terrain:
+        print(f"Террейн загружен для {len(cell_terrain)} ячеек (elevation/mountainess).")
+    else:
+        print("Террейн не найден (cell_terrain.json) — фичи рельефа пропущены.")
+
+    # Годы и последняя дата данных определяются автоматически из полётов: так
+    # подключение нового сезона (напр. частичного 2026) не требует правок кода —
+    # таймлайн обрежется по факту (см. build_cell_dataset).
+    available_years = sorted(int(y) for y in df_flights["year"].dropna().unique())
+    data_max_date = pd.to_datetime(df_flights["date"]).dt.tz_localize(None).max().normalize()
+    print(f"Годы в данных: {available_years}; последняя дата: {data_max_date.date()}")
+
     print(f"\nСоздаю датасеты для {len(cells)} ячеек с фильтром XC>={min_xc_points} очков...\n")
 
     all_datasets = []
     for cell_id in tqdm(cells, desc="Обработка ячеек"):
-        cell_df = build_cell_dataset(cell_id, df_flights, cache, min_xc_points)
+        cell_df = build_cell_dataset(
+            cell_id, df_flights, cache, min_xc_points, cell_terrain,
+            available_years=available_years, data_max_date=data_max_date,
+        )
         if not cell_df.empty:
             all_datasets.append(cell_df)
         else:

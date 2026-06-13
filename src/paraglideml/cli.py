@@ -22,7 +22,9 @@ from .config import (
 from .data.cell_analyzer import get_cell_statistics, select_quality_cells
 from .data.dataset_builder import build_multicell_dataset
 from .data.gfs_processor import run_gfs_cache_creation
-from .train import run_training_pipeline
+
+# NOTE: heavy training/NN imports (.train -> torch) are done lazily inside the commands
+# that need them, so the `paraglideml` CLI and the lean inference path start without torch.
 
 app = typer.Typer(help="Paraglideml CLI: Machine Learning for Paragliding")
 data_app = typer.Typer(help="Data processing and cache management")
@@ -176,6 +178,28 @@ def data_build(
     )
 
 
+@data_app.command("terrain")
+def data_terrain(
+    selected_cells: Path = typer.Option(
+        PROCESSED_DATA_DIR / "selected_cells.json", help="JSON file with selected cells"
+    ),
+    sites_dir: Optional[str] = typer.Option(
+        None, help="FlyBeeper spot json dir (default: config.FLYBEEPER_SITES_DIR)"
+    ),
+):
+    """
+    Aggregate FlyBeeper launch sites into per-cell terrain & slope orientations.
+
+    Uses known site altitudes (dhv_loc.geojson) and launch-orientation flags
+    (takeoff.geojson) to write data/processed/cell_terrain.json, which the dataset
+    builder merges as features (elevation, mountainess, slope-wind alignment).
+    """
+    from .data.terrain import build_cell_terrain
+
+    typer.echo("Aggregating FlyBeeper spot terrain & orientations...")
+    build_cell_terrain(selected_cells_path=str(selected_cells), sites_dir=sites_dir)
+
+
 # =============================================================================
 # TRAIN COMMANDS
 # =============================================================================
@@ -196,6 +220,8 @@ def train_model(
     """
     Train the multi-regional model using the defined pipeline.
     """
+    from .train import run_training_pipeline  # lazy: pulls torch only when training
+
     print("Starting training pipeline with:")
     print(f"  Regions: {num_regions}, Epochs: {epochs}, LR: {learning_rate}, BS: {batch_size}")
 
@@ -213,6 +239,252 @@ def train_model(
         typer.echo("Please ensure the dataset exists at the configured path.", err=True)
     except Exception as e:
         typer.echo(f"An error occurred during training: {e}", err=True)
+
+
+@train_app.command("baseline")
+def train_baseline(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    learning_rate: float = typer.Option(0.05, help="Gradient boosting learning rate"),
+    max_iter: int = typer.Option(400, help="Max boosting iterations (trees)"),
+    max_leaf_nodes: int = typer.Option(31, help="Max leaf nodes per tree (capacity)"),
+):
+    """
+    Train a gradient-boosted baseline (HistGradientBoostingClassifier) on the same
+    features and honest protocol as the NN, to establish the realistic ceiling.
+    """
+    from .baseline import run_baseline_pipeline
+
+    print("Starting gradient-boosted baseline...")
+    try:
+        exp_path = run_baseline_pipeline(
+            experiments_dir=experiments_dir,
+            learning_rate=learning_rate,
+            max_iter=max_iter,
+            max_leaf_nodes=max_leaf_nodes,
+        )
+        print(f"\nBaseline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during baseline training: {e}", err=True)
+
+
+@train_app.command("goodxc")
+def train_goodxc(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    good_km: float = typer.Option(50.0, help="Distance (km) that marks a 'good XC day'"),
+    broad_min: int = typer.Option(
+        5, help="Cells in a region reaching good_km for the day to count as broadly good"
+    ),
+    drop_middle: bool = typer.Option(
+        False, "--drop-middle", help="Hard-exclude the ambiguous middle from training"
+    ),
+    target_precision: float = typer.Option(
+        0.80, help="Precision target for the anti-noise operating point (chosen on val)"
+    ),
+):
+    """
+    Train the distance-based P(good XC day) model — the product target for the bot.
+
+    Reports Average Precision / calibration on the held-out year, alongside the AP
+    of the old is_flyable label on the same features, to show whether distance is a
+    cleaner, more weather-predictable target.
+    """
+    from .goodxc import run_goodxc_pipeline
+
+    print("Starting P(good XC day) pipeline...")
+    try:
+        exp_path = run_goodxc_pipeline(
+            experiments_dir=experiments_dir,
+            good_km=good_km,
+            broad_min=broad_min,
+            drop_middle=drop_middle,
+            target_precision=target_precision,
+        )
+        print(f"\ngood-xc pipeline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during good-xc training: {e}", err=True)
+
+
+@train_app.command("backtest")
+def train_backtest(
+    broad_min: int = typer.Option(5, help="Regional-consensus broad threshold"),
+):
+    """
+    Rolling-origin backtest of the good-XC recipe: for each year, fit on all prior
+    years and score on that year. Reports AP/ROC per tier per year + the mean — an
+    estimate of how the recipe generalizes to any unseen season.
+    """
+    from .goodxc import run_backtest
+
+    print("Starting rolling backtest...")
+    try:
+        run_backtest(broad_min=broad_min)
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during backtest: {e}", err=True)
+
+
+@train_app.command("ordinal")
+def train_ordinal(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    broad_min: int = typer.Option(
+        5, help="Cells in a region reaching a tier for the day to count as broadly good"
+    ),
+    production: bool = typer.Option(
+        False, "--production", help="Fit on ALL years (no holdout) for deployment; "
+        "quality is estimated via `train backtest`, not a held-out test"
+    ),
+):
+    """
+    Train calibrated ordinal flight-quality tiers: cumulative P(>=flyable/good/epic).
+
+    Three distance thresholds (15/50/100 km) trained as calibrated binary models with
+    regional-consensus confidence, reported with AP/ROC/Brier and a monotonicity check.
+    """
+    from .ordinal import run_ordinal_pipeline
+
+    print("Starting ordinal tier pipeline...")
+    try:
+        exp_path = run_ordinal_pipeline(
+            experiments_dir=experiments_dir, broad_min=broad_min, production=production
+        )
+        print(f"\nOrdinal pipeline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during ordinal training: {e}", err=True)
+
+
+@app.command("forecast")
+def forecast(
+    date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
+    experiment: Optional[str] = typer.Option(
+        None, "--experiment", help="Experiment name to load (default: latest NN with model.pth)"
+    ),
+    grib_dir: Optional[str] = typer.Option(
+        None,
+        "--grib-dir",
+        help="Where to download GRIB (default: NVMe data/gfs/forecast_grib; "
+        "point at a big disk for large backfills)",
+    ),
+):
+    """
+    Download GFS for a date, run the trained model, and print per-spot flyability.
+
+    Fetches only the needed GRIB messages (byte-range). v1 uses the 0.25 deg
+    analysis (real conditions for the date) — ideal for eyeballing the model
+    against a recent day.
+    """
+    from .predict import run_forecast
+
+    try:
+        run_forecast(date_str=date, experiment=experiment, grib_dir=grib_dir)
+    except Exception as e:
+        typer.echo(f"Forecast failed: {e}", err=True)
+
+
+@app.command("forecast-tiers")
+def forecast_tiers(
+    date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
+    experiment: Optional[str] = typer.Option(
+        None, "--experiment", help="Dev: use models/experiments/<name> instead of the bundled model"
+    ),
+    model_dir: Optional[str] = typer.Option(
+        None, "--model-dir", help="Model dir override (else $PARAGLIDEML_MODEL_DIR or bundled exp_056)"
+    ),
+    grib_dir: Optional[str] = typer.Option(None, "--grib-dir", help="Where to download GRIB"),
+    push_threshold: float = typer.Option(
+        0.5, help="P(>=good) threshold for the bot's push decision in the table"
+    ),
+    geojson: Optional[str] = typer.Option(
+        None, "--geojson", help="Also write the artifact (1-degree squares + tiers) to this path"
+    ),
+):
+    """
+    Forecast ordinal flight-quality tiers for a date: per-spot P(>=flyable/good/epic).
+
+    Cumulative calibrated probabilities from the bundled exp_056 model (or an override).
+    The bot pushes on P(>=good); --geojson emits the map/pipeline artifact for the date.
+    """
+    from .predict import run_ordinal_forecast
+
+    try:
+        run_ordinal_forecast(
+            date_str=date, experiment=experiment, model_dir=model_dir, grib_dir=grib_dir,
+            push_threshold=push_threshold, geojson_out=geojson,
+        )
+    except Exception as e:
+        typer.echo(f"Tier forecast failed: {e}", err=True)
+
+
+@app.command("forecast-window")
+def forecast_window_cmd(
+    run_date: str = typer.Option(..., "--run-date", help="GFS run date YYYY-MM-DD (the 00z cycle to forecast from)"),
+    days: int = typer.Option(3, "--days", help="Horizon in days: run_date+1 .. run_date+days"),
+    out: str = typer.Option(..., "--out", help="Write the multi-day GeoJSON artifact to this path"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Model dir override (else bundled exp_056)"),
+    grib_dir: Optional[str] = typer.Option(None, "--grib-dir", help="Where to download forecast GRIB"),
+):
+    """
+    Produce the production artifact: per-cell P(>=flyable/good/epic) for the next `days`
+    days, each scored from its forecast lead-time off the run_date 00z cycle. Writes a
+    GeoJSON FeatureCollection of 1-degree squares (cells x days) — the R2 / map contract.
+    """
+    import json as _json
+
+    from .predict import forecast_window, tiers_to_geojson
+
+    try:
+        rows = forecast_window(run_date, days=days, model_dir=model_dir, grib_dir=grib_dir)
+        gj = tiers_to_geojson(rows)
+        Path(out).write_text(_json.dumps(gj))
+        typer.echo(f"Wrote {len(gj['features'])} features ({days} days x cells) to {out}")
+    except Exception as e:
+        typer.echo(f"Forecast-window failed: {e}", err=True)
+        raise
+
+
+@app.command("forecast-skew")
+def forecast_skew(
+    start: str = typer.Option(..., "--start", help="Window start YYYY-MM-DD (valid days with known outcomes)"),
+    end: str = typer.Option(..., "--end", help="Window end YYYY-MM-DD"),
+    leads: str = typer.Option("1,3,5", "--leads", help="Forecast lead-times in DAYS, comma-separated"),
+    sample_every: int = typer.Option(1, "--sample-every", help="Use every Nth day in the window (cut downloads)"),
+    experiment: Optional[str] = typer.Option(None, "--experiment", help="Ordinal experiment (default: latest production)"),
+    scratch_root: Optional[str] = typer.Option(None, "--scratch", help="Where to stash forecast GRIB+cache"),
+):
+    """
+    Measure how much AP/ROC drops when the ordinal model is fed GFS *forecast*
+    lead-times (the bot's reality) instead of the *analysis* it trained on.
+
+    Downloads, for each lead L, the same valid days from the run issued L days earlier
+    and re-scores on the identical cell-days. Decides v1 deploy: ship-as-is on short
+    horizons vs forecast-aware retrain. WARNING: ~107 MB per slice, 3 slices/day/lead.
+    """
+    from .skew import run_forecast_skew
+
+    lead_list = [int(x) for x in leads.split(",") if x.strip()]
+    try:
+        run_forecast_skew(
+            start_date=start, end_date=end, leads=lead_list,
+            experiment=experiment, sample_every=sample_every, scratch_root=scratch_root,
+        )
+    except Exception as e:
+        typer.echo(f"Forecast-skew failed: {e}", err=True)
+        raise
 
 
 # =============================================================================
