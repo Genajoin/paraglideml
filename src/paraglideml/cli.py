@@ -246,6 +246,48 @@ def train_baseline(
         typer.echo(f"An error occurred during baseline training: {e}", err=True)
 
 
+@train_app.command("goodxc")
+def train_goodxc(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    good_km: float = typer.Option(50.0, help="Distance (km) that marks a 'good XC day'"),
+    broad_min: int = typer.Option(
+        5, help="Cells in a region reaching good_km for the day to count as broadly good"
+    ),
+    drop_middle: bool = typer.Option(
+        False, "--drop-middle", help="Hard-exclude the ambiguous middle from training"
+    ),
+    target_precision: float = typer.Option(
+        0.80, help="Precision target for the anti-noise operating point (chosen on val)"
+    ),
+):
+    """
+    Train the distance-based P(good XC day) model — the product target for the bot.
+
+    Reports Average Precision / calibration on the held-out year, alongside the AP
+    of the old is_flyable label on the same features, to show whether distance is a
+    cleaner, more weather-predictable target.
+    """
+    from .goodxc import run_goodxc_pipeline
+
+    print("Starting P(good XC day) pipeline...")
+    try:
+        exp_path = run_goodxc_pipeline(
+            experiments_dir=experiments_dir,
+            good_km=good_km,
+            broad_min=broad_min,
+            drop_middle=drop_middle,
+            target_precision=target_precision,
+        )
+        print(f"\ngood-xc pipeline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during good-xc training: {e}", err=True)
+
+
 @app.command("forecast")
 def forecast(
     date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
