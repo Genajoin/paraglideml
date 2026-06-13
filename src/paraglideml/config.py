@@ -31,6 +31,10 @@ DATA_DIR = Path(os.getenv("PARAGLIDEML_DATA_DIR", PROJECT_ROOT / "data"))
 GFS_DIR = Path(os.getenv("PARAGLIDEML_GFS_DIR", DATA_DIR / "gfs"))
 GFS_ANL_DIR = Path(os.getenv("PARAGLIDEML_GFS_ANL_DIR", GFS_DIR / "anl"))
 GFS_CACHE_DIR = Path(os.getenv("PARAGLIDEML_GFS_CACHE_DIR", GFS_DIR / "cache"))
+# Landing dir for on-demand forecast/inference GRIB downloads. Small samples stay
+# on fast local storage (NVMe); point this at a large/slow disk (HDD) for big
+# history backfills via PARAGLIDEML_FORECAST_GRIB_DIR or the --grib-dir flag.
+GFS_FORECAST_DIR = Path(os.getenv("PARAGLIDEML_FORECAST_GRIB_DIR", GFS_DIR / "forecast_grib"))
 PROCESSED_DATA_DIR = Path(os.getenv("PARAGLIDEML_PROCESSED_DATA_DIR", DATA_DIR / "processed"))
 FLIGHTS_DIR = Path(os.getenv("PARAGLIDEML_FLIGHTS_DIR", DATA_DIR / "flights"))
 

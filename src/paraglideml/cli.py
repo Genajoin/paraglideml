@@ -252,6 +252,12 @@ def forecast(
     experiment: Optional[str] = typer.Option(
         None, "--experiment", help="Experiment name to load (default: latest NN with model.pth)"
     ),
+    grib_dir: Optional[str] = typer.Option(
+        None,
+        "--grib-dir",
+        help="Where to download GRIB (default: NVMe data/gfs/forecast_grib; "
+        "point at a big disk for large backfills)",
+    ),
 ):
     """
     Download GFS for a date, run the trained model, and print per-spot flyability.
@@ -263,7 +269,7 @@ def forecast(
     from .predict import run_forecast
 
     try:
-        run_forecast(date_str=date, experiment=experiment)
+        run_forecast(date_str=date, experiment=experiment, grib_dir=grib_dir)
     except Exception as e:
         typer.echo(f"Forecast failed: {e}", err=True)
 

@@ -23,18 +23,13 @@ import numpy as np
 import pandas as pd
 import torch
 
-from .config import EXPERIMENTS_DIR, GFS_CACHE_DIR, PROCESSED_DATA_DIR
+from .config import EXPERIMENTS_DIR, GFS_CACHE_DIR, GFS_FORECAST_DIR, PROCESSED_DATA_DIR
 from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import PRESSURE_LEVELS, run_gfs_cache_creation
 from .data.weather_cache import WeatherCache
 from .multiregional import MultiRegionalModel
 
 S3_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
-
-# Local landing dir for freshly downloaded GRIB. NOT GFS_ANL_DIR — that is a
-# symlink to an external backup that may be unmounted; forecast downloads must be
-# writable locally and independent of the training archive.
-FORECAST_GRIB_DIR = GFS_CACHE_DIR.parent / "forecast_grib"
 
 # Which GRIB messages the model needs, expressed as (.idx VAR, level) selectors.
 _PRESSURE_VARS = {"TMP", "HGT", "RH", "UGRD", "VGRD", "VVEL"}
@@ -145,9 +140,11 @@ def run_forecast(
     date_str: str,
     experiment: Optional[str] = None,
     selected_cells_path: Optional[Path] = None,
+    grib_dir: Optional[str] = None,
 ) -> pd.DataFrame:
     """Download GFS for a date, run the model, return a per-cell prediction table."""
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
 
     # 1. Fetch the 06/12/18 slices (byte-range). Prefer the analysis (real
     #    conditions); if it isn't posted yet (today/future), fall back to the
@@ -156,7 +153,7 @@ def run_forecast(
     sources = {}
     for hour in (6, 12, 18):
         dest = (
-            FORECAST_GRIB_DIR
+            grib_root
             / target.strftime("%Y-%m")
             / f"gfsanl_3_{target.strftime('%Y%m%d')}_{hour:02d}00_000.grb2"
         )
@@ -173,7 +170,7 @@ def run_forecast(
     run_gfs_cache_creation(
         dates=f"{date_str}:{date_str}",
         bbox="6.0,43.0,17.0,49.0",
-        source_dir=FORECAST_GRIB_DIR,
+        source_dir=grib_root,
         output_dir=GFS_CACHE_DIR,
         force=True,
     )
