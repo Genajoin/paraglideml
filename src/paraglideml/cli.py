@@ -288,6 +288,34 @@ def train_goodxc(
         typer.echo(f"An error occurred during good-xc training: {e}", err=True)
 
 
+@train_app.command("ordinal")
+def train_ordinal(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    broad_min: int = typer.Option(
+        5, help="Cells in a region reaching a tier for the day to count as broadly good"
+    ),
+):
+    """
+    Train calibrated ordinal flight-quality tiers: cumulative P(>=flyable/good/epic).
+
+    Three distance thresholds (15/50/100 km) trained as calibrated binary models with
+    regional-consensus confidence, reported with AP/ROC/Brier and a monotonicity check.
+    """
+    from .ordinal import run_ordinal_pipeline
+
+    print("Starting ordinal tier pipeline...")
+    try:
+        exp_path = run_ordinal_pipeline(experiments_dir=experiments_dir, broad_min=broad_min)
+        print(f"\nOrdinal pipeline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during ordinal training: {e}", err=True)
+
+
 @app.command("forecast")
 def forecast(
     date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
