@@ -40,6 +40,11 @@ dev = [
     "jupyterlab",
     "ipykernel",
 ]
+# Needed only for the one-time spot-centric terrain extraction
+# (`paraglideml data terrain`); training/inference read the cached JSON.
+terrain = [
+    "rasterio>=1.4",
+]
 
 [project.scripts]
 paraglideml = "paraglideml.cli:app"

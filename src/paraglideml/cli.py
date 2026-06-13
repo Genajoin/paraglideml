@@ -176,6 +176,36 @@ def data_build(
     )
 
 
+@data_app.command("terrain")
+def data_terrain(
+    selected_cells: Path = typer.Option(
+        PROCESSED_DATA_DIR / "selected_cells.json", help="JSON file with selected cells"
+    ),
+    flights_dir: Path = typer.Option(FLIGHTS_DIR, help="Directory with flight logs"),
+    elevation_tif: Optional[str] = typer.Option(
+        None, help="Elevation GeoTIFF (default: config.ELEVATION_TIF / ETOPO archive)"
+    ),
+    min_xc_points: int = typer.Option(
+        DEFAULT_MIN_XC_POINTS, help="Minimum XContest points for quality XC flight"
+    ),
+):
+    """
+    Compute spot-centric terrain (launch-point elevation & mountainess) per cell.
+
+    Reads the elevation raster once and writes a small data/processed/cell_terrain.json
+    that the dataset builder merges as features. Requires rasterio (extraction only).
+    """
+    from .data.terrain import build_cell_terrain
+
+    typer.echo("Computing spot-centric terrain...")
+    build_cell_terrain(
+        selected_cells_path=str(selected_cells),
+        flights_dir=str(flights_dir),
+        elevation_tif=elevation_tif,
+        min_xc_points=min_xc_points,
+    )
+
+
 # =============================================================================
 # TRAIN COMMANDS
 # =============================================================================

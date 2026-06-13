@@ -108,7 +108,11 @@ def compute_day_features(
 
 
 def build_cell_dataset(
-    cell_id: str, df_flights: pd.DataFrame, cache: WeatherCache, min_xc_points: int = 10
+    cell_id: str,
+    df_flights: pd.DataFrame,
+    cache: WeatherCache,
+    min_xc_points: int = 10,
+    cell_terrain: Optional[dict] = None,
 ) -> pd.DataFrame:
     """
     Создаёт датасет для одной ячейки.
@@ -209,6 +213,13 @@ def build_cell_dataset(
     dataset["cell_lon"] = cell_lon
     dataset["day_of_year"] = dataset["date"].dt.dayofyear
 
+    # Спот-центричный террейн (высота/горность в точке старта) — статичные фичи
+    # ячейки. Это ФИЧИ модели (рельеф, не исход), грузятся из cell_terrain.json,
+    # если он построен (`paraglideml data terrain`); иначе колонки не добавляются.
+    if cell_terrain and cell_id in cell_terrain:
+        dataset["elevation"] = float(cell_terrain[cell_id]["elevation"])
+        dataset["mountainess"] = float(cell_terrain[cell_id]["mountainess"])
+
     return dataset
 
 
@@ -246,11 +257,20 @@ def build_multicell_dataset(
     print("Инициализирую weather cache...")
     cache = WeatherCache(cache_root=cache_root)
 
+    # Спот-центричный террейн (если построен) — добавит фичи elevation/mountainess.
+    from .terrain import load_cell_terrain
+
+    cell_terrain = load_cell_terrain()
+    if cell_terrain:
+        print(f"Террейн загружен для {len(cell_terrain)} ячеек (elevation/mountainess).")
+    else:
+        print("Террейн не найден (cell_terrain.json) — фичи рельефа пропущены.")
+
     print(f"\nСоздаю датасеты для {len(cells)} ячеек с фильтром XC>={min_xc_points} очков...\n")
 
     all_datasets = []
     for cell_id in tqdm(cells, desc="Обработка ячеек"):
-        cell_df = build_cell_dataset(cell_id, df_flights, cache, min_xc_points)
+        cell_df = build_cell_dataset(cell_id, df_flights, cache, min_xc_points, cell_terrain)
         if not cell_df.empty:
             all_datasets.append(cell_df)
         else:
