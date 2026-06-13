@@ -113,6 +113,8 @@ def build_cell_dataset(
     cache: WeatherCache,
     min_xc_points: int = 10,
     cell_terrain: Optional[dict] = None,
+    available_years: Optional[List[int]] = None,
+    data_max_date: Optional[pd.Timestamp] = None,
 ) -> pd.DataFrame:
     """
     Создаёт датасет для одной ячейки.
@@ -168,12 +170,20 @@ def build_cell_dataset(
     )
     daily_flights.rename(columns={"date_only": "date"}, inplace=True)
 
-    # Создаём target timeline (15 мая - 15 сентября)
+    # Создаём target timeline (сезон 15 мая - 15 сентября). Для текущего/частичного
+    # года обрезаем конец по последней дате данных — иначе будущие дни без полётов
+    # стали бы ложными «нелётными» нулями.
+    if available_years is None:
+        available_years = [2021, 2022, 2023, 2024, 2025]
     target_dates = []
-    available_years = [2021, 2022, 2023, 2024, 2025]
     for y in available_years:
-        rng = pd.date_range(f"{y}-05-15", f"{y}-09-15")
-        target_dates.extend(rng)
+        season_start = pd.Timestamp(f"{y}-05-15")
+        season_end = pd.Timestamp(f"{y}-09-15")
+        if data_max_date is not None:
+            season_end = min(season_end, pd.Timestamp(data_max_date))
+        if season_start > season_end:
+            continue
+        target_dates.extend(pd.date_range(season_start, season_end))
 
     df_target = pd.DataFrame({"date": target_dates})
     df_target["date"] = pd.to_datetime(df_target["date"]).dt.normalize()
@@ -267,11 +277,21 @@ def build_multicell_dataset(
     else:
         print("Террейн не найден (cell_terrain.json) — фичи рельефа пропущены.")
 
+    # Годы и последняя дата данных определяются автоматически из полётов: так
+    # подключение нового сезона (напр. частичного 2026) не требует правок кода —
+    # таймлайн обрежется по факту (см. build_cell_dataset).
+    available_years = sorted(int(y) for y in df_flights["year"].dropna().unique())
+    data_max_date = pd.to_datetime(df_flights["date"]).dt.tz_localize(None).max().normalize()
+    print(f"Годы в данных: {available_years}; последняя дата: {data_max_date.date()}")
+
     print(f"\nСоздаю датасеты для {len(cells)} ячеек с фильтром XC>={min_xc_points} очков...\n")
 
     all_datasets = []
     for cell_id in tqdm(cells, desc="Обработка ячеек"):
-        cell_df = build_cell_dataset(cell_id, df_flights, cache, min_xc_points, cell_terrain)
+        cell_df = build_cell_dataset(
+            cell_id, df_flights, cache, min_xc_points, cell_terrain,
+            available_years=available_years, data_max_date=data_max_date,
+        )
         if not cell_df.empty:
             all_datasets.append(cell_df)
         else:

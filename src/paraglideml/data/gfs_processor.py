@@ -167,6 +167,9 @@ def run_gfs_cache_creation(
     output_dir: Path = GFS_CACHE_DIR,
     force: bool = False,
 ):
+    # Coerce to Path: callers may pass str, and get_cache_path uses the / operator.
+    source_dir = Path(source_dir)
+    output_dir = Path(output_dir)
     datetimes = parse_date_ranges(dates)
     cells = parse_bbox(bbox)
 

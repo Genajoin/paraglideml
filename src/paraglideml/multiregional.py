@@ -412,9 +412,13 @@ def load_and_prepare_data(
     df["date"] = pd.to_datetime(df["date"])
     df["year"] = df["date"].dt.year
 
-    # Train/test split by year
-    train_df = df[df["year"] < 2025].copy()
-    test_df = df[df["year"] == 2025].copy()
+    # Train/test split by year — test = the most recent year present (auto-advances
+    # as new seasons are added, e.g. 2026), val = next most recent (see
+    # create_data_loaders), train = everything older. No code change to roll forward.
+    test_year = int(df["year"].max())
+    train_df = df[df["year"] < test_year].copy()
+    test_df = df[df["year"] == test_year].copy()
+    print(f"Temporal split: train < {test_year}, test == {test_year}")
 
     # Geographical clustering
     print(f"Performing geographical clustering into {config.num_regions} regions...")
