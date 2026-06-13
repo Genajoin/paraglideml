@@ -146,9 +146,22 @@ def build_cell_dataset(
         if len(df_cell) == 0:
             return pd.DataFrame()
 
-    # Агрегация по дням
+    # Агрегация по дням. Кроме счётчика полётов сохраняем дневные агрегаты
+    # дистанции/очков XContest — это сырьё для distance-цели «хороший XC-день»
+    # (см. target-methodology). Эти колонки НЕ используются как фичи модели
+    # (они — исход, не предиктор) и исключаются в multiregional.drop_cols.
     df_cell["date_only"] = pd.to_datetime(df_cell["date"]).dt.tz_localize(None).dt.normalize()
-    daily_flights = df_cell.groupby("date_only").agg(flight_count=("id", "count")).reset_index()
+    daily_flights = (
+        df_cell.groupby("date_only")
+        .agg(
+            flight_count=("id", "count"),
+            dist_max=("distance", "max"),
+            dist_mean=("distance", "mean"),
+            dist_sum=("distance", "sum"),
+            pts_max=("points", "max"),
+        )
+        .reset_index()
+    )
     daily_flights.rename(columns={"date_only": "date"}, inplace=True)
 
     # Создаём target timeline (15 мая - 15 сентября)

@@ -459,6 +459,12 @@ def load_and_prepare_data(
         "region_id",
         "is_weekend",
         "day_of_year",
+        # Flight-outcome aggregates (distance/points). These ARE the label signal
+        # for the distance-based "good XC day" target — never feed them as inputs.
+        "dist_max",
+        "dist_mean",
+        "dist_sum",
+        "pts_max",
     ]
     feature_names = [c for c in df.columns if c not in drop_cols]
     print(f"  Features: {len(feature_names)}")
