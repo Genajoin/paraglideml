@@ -142,7 +142,10 @@ def process_grib_pygrib(
                 break
 
         if matched:
-            key_name = f"{short_name}{suffix}"
+            # Underscore between short name and level suffix (e.g. "2t_2m",
+            # "gh_850hPa") — this is the key format the cache and weather_cache
+            # consumer expect; without it derived features silently read as 0.
+            key_name = f"{short_name}_{suffix}"
             try:
                 vals_array = grb.values
                 for i, cell in enumerate(cells):
