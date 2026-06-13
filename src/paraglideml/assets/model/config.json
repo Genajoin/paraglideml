@@ -1,0 +1,31 @@
+{
+  "model_type": "OrdinalTiers(HistGradientBoosting x3)",
+  "tiers": {
+    "flyable": {
+      "km": 15.0,
+      "base_rate": 0.4822222222222222,
+      "average_precision": 0.9482942498859485,
+      "roc_auc": 0.9596384125665588,
+      "brier": 0.0789725973613744
+    },
+    "good": {
+      "km": 50.0,
+      "base_rate": 0.2859259259259259,
+      "average_precision": 0.9122760930884395,
+      "roc_auc": 0.9649560337970029,
+      "brier": 0.0659879667570435
+    },
+    "epic": {
+      "km": 100.0,
+      "base_rate": 0.16,
+      "average_precision": 0.8569468739559961,
+      "roc_auc": 0.972093621399177,
+      "brier": 0.04450839389711572
+    }
+  },
+  "monotonicity_clamp_rate": 0.11333333333333333,
+  "broad_min": 5,
+  "num_features": 52,
+  "production": true,
+  "metrics_note": "in-sample (no holdout); see `train backtest`"
+}

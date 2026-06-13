@@ -21,14 +21,17 @@ from typing import List, Optional, Tuple
 import joblib
 import numpy as np
 import pandas as pd
-import torch
 
+from . import assets
 from .config import EXPERIMENTS_DIR, GFS_CACHE_DIR, GFS_FORECAST_DIR, PROCESSED_DATA_DIR
 from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import PRESSURE_LEVELS, run_gfs_cache_creation
 from .data.terrain import add_terrain_features, load_cell_terrain
 from .data.weather_cache import WeatherCache
-from .multiregional import MultiRegionalModel
+from .tiers import TIER_LABELS
+
+# torch + the NN model are imported lazily inside run_forecast() so the ordinal /
+# library inference path (predict_tiers) stays torch-free — `paraglideml[inference]`.
 
 S3_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
 
@@ -202,6 +205,10 @@ def run_forecast(
     grib_dir: Optional[str] = None,
 ) -> pd.DataFrame:
     """Download GFS for a date, run the model, return a per-cell prediction table."""
+    import torch  # lazy: only the NN path needs torch (keeps ordinal inference lean)
+
+    from .multiregional import MultiRegionalModel
+
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
 
@@ -281,55 +288,111 @@ def run_forecast(
     return df
 
 
-def run_ordinal_forecast(
+def _load_ordinal_models(model_dir: Path):
+    """Load the ordinal trio + calibrators + feature order from a model dir."""
+    feature_names = [l for l in (model_dir / "features.txt").read_text().splitlines() if l.strip()]
+    models = {lbl: joblib.load(model_dir / f"model_{lbl}.joblib") for lbl in TIER_LABELS}
+    calibrators = {lbl: joblib.load(model_dir / f"calibrator_{lbl}.joblib") for lbl in TIER_LABELS}
+    return feature_names, models, calibrators
+
+
+def predict_tiers(
     date_str: str,
-    experiment: Optional[str] = None,
-    selected_cells_path: Optional[Path] = None,
+    model_dir: Optional[Path] = None,
+    cells: Optional[List[str]] = None,
     grib_dir: Optional[str] = None,
-    push_threshold: float = 0.5,
-) -> pd.DataFrame:
-    """Run the ordinal tier models for a date: per-cell P(>=flyable/good/epic).
+) -> List[dict]:
+    """Per-cell cumulative tier probabilities for one date — the library inference API.
 
-    Cumulative, calibrated probabilities (monotone by construction). The bot pushes
-    on P(>=good); the other tiers add context. Uses the GFS analysis for a past date
-    (real conditions) — ideal for eyeballing the tiers against what actually flew.
+    Returns one dict per cell: {cell, lat, lon, date, p_flyable, p_good, p_epic}, with
+    probabilities calibrated and clamped non-increasing (P>=flyable >= P>=good >= P>=epic).
+    No printing — the bot / pipeline / GeoJSON builder consume the returned list.
+
+    Model defaults to the bundled exp_056 (override via PARAGLIDEML_MODEL_DIR or model_dir).
+    Downloads + extracts the GFS slice for the date using the shared fetch path.
     """
-    from .ordinal import TIERS
+    mdir = Path(model_dir) if model_dir else assets.model_dir()
+    feature_names, models, calibrators = _load_ordinal_models(mdir)
 
-    labels = [lbl for _, lbl in TIERS]
-    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
-
     _fetch_and_extract(date_str, grib_root)
+    target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
 
-    exp_dir = _resolve_ordinal_experiment(experiment)
-    feature_names = (exp_dir / "features.txt").read_text().splitlines()
-    region_map = json.loads((exp_dir / "region_mapping.json").read_text())
-    models = {lbl: joblib.load(exp_dir / f"model_{lbl}.joblib") for lbl in labels}
-    calibrators = {lbl: joblib.load(exp_dir / f"calibrator_{lbl}.joblib") for lbl in labels}
-    print(f">>> Ordinal model: {exp_dir.name} ({len(feature_names)} features, tiers {labels})")
-
-    if selected_cells_path is None:
-        selected_cells_path = PROCESSED_DATA_DIR / "selected_cells.json"
-    cells = json.loads(Path(selected_cells_path).read_text())
+    if cells is None:
+        cells = json.loads(assets.cells_path().read_text())
+    terrain = load_cell_terrain(str(assets.terrain_path())) or {}
     cache = WeatherCache(cache_root=str(GFS_CACHE_DIR))
-    terrain = load_cell_terrain() or {}
     ts = pd.Timestamp(target)
 
-    rows = []
+    rows: List[dict] = []
     for cell in cells:
         lat, lon = map(int, cell.split("_"))
         rec = compute_day_features(cache, lat, lon, ts)
         if rec is None:
             continue
         x = _feature_vector(rec, feature_names, terrain.get(cell))
-        # Calibrated probability per tier, then clamp to be non-increasing.
-        probs = [float(calibrators[lbl].transform(models[lbl].predict_proba(x)[:, 1])[0]) for lbl in labels]
-        for i in range(1, len(probs)):
+        probs = [float(calibrators[lbl].transform(models[lbl].predict_proba(x)[:, 1])[0]) for lbl in TIER_LABELS]
+        for i in range(1, len(probs)):  # enforce monotonicity across tiers
             probs[i] = min(probs[i], probs[i - 1])
-        row = {"cell": cell, "lat": lat, "lon": lon, "region": int(region_map.get(cell, 0))}
-        row.update({f"p_{lbl}": p for lbl, p in zip(labels, probs)})
+        row = {"cell": cell, "lat": lat, "lon": lon, "date": date_str}
+        row.update({f"p_{lbl}": p for lbl, p in zip(TIER_LABELS, probs)})
         rows.append(row)
+    return rows
+
+
+def tiers_to_geojson(rows: List[dict], date_str: Optional[str] = None) -> dict:
+    """Render tier rows as a GeoJSON FeatureCollection of honest 1-degree squares.
+
+    Each GFS cell `lat_lon` covers [lon, lon+1] x [lat, lat+1] degrees; we emit that exact
+    square polygon (not a point) so the map never implies sub-cell precision. This is the
+    artifact contract: the pipeline writes it to R2, the Worker serves it, the map layer
+    and the GitHub snapshot demo both render it.
+    """
+    features = []
+    for r in rows:
+        lat, lon = int(r["lat"]), int(r["lon"])
+        ring = [[lon, lat], [lon + 1, lat], [lon + 1, lat + 1], [lon, lat + 1], [lon, lat]]
+        props = {
+            "cell": r["cell"],
+            "p_flyable": round(float(r.get("p_flyable", 0.0)), 4),
+            "p_good": round(float(r.get("p_good", 0.0)), 4),
+            "p_epic": round(float(r.get("p_epic", 0.0)), 4),
+        }
+        d = date_str or r.get("date")
+        if d:
+            props["date"] = d
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [ring]},
+            "properties": props,
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+def run_ordinal_forecast(
+    date_str: str,
+    experiment: Optional[str] = None,
+    selected_cells_path: Optional[Path] = None,
+    grib_dir: Optional[str] = None,
+    push_threshold: float = 0.5,
+    model_dir: Optional[str] = None,
+    geojson_out: Optional[str] = None,
+) -> pd.DataFrame:
+    """CLI-facing wrapper: compute tiers, print the table, optionally write GeoJSON.
+
+    Model source precedence: --experiment (dev, scans experiments/) > model_dir > bundled
+    exp_056 (default). Cumulative calibrated probabilities; the bot pushes on P(>=good).
+    Uses the GFS analysis for a past date — ideal for eyeballing the tiers vs what flew.
+    """
+    mdir: Optional[Path] = None
+    if experiment:
+        mdir = _resolve_ordinal_experiment(experiment)
+    elif model_dir:
+        mdir = Path(model_dir)
+    print(f">>> Ordinal model: {mdir if mdir else assets.model_dir()} (tiers {TIER_LABELS})")
+
+    cells = json.loads(Path(selected_cells_path).read_text()) if selected_cells_path else None
+    rows = predict_tiers(date_str, model_dir=mdir, cells=cells, grib_dir=grib_dir)
 
     if not rows:
         print(f"\n=== Tier forecast for {date_str} ===")
@@ -342,7 +405,7 @@ def run_ordinal_forecast(
     for _, r in df.iterrows():
         bar = "#" * int(round(r["p_good"] * 20))
         push = "→PUSH" if r["p_good"] >= push_threshold else "     "
-        print(f"  {r['cell']:>6}  r{r['region']}  "
+        print(f"  {r['cell']:>6}  "
               f"fly {r['p_flyable']*100:4.0f}%  good {r['p_good']*100:4.0f}%  "
               f"epic {r['p_epic']*100:4.0f}%  {push} {bar}")
     n_good = int((df["p_good"] >= push_threshold).sum())
@@ -350,4 +413,9 @@ def run_ordinal_forecast(
     print(f"\n  {n_good}/{len(df)} cells P(>=good)>={push_threshold:.0%}, "
           f"{n_epic} P(>=epic)>={push_threshold:.0%} "
           f"(regional signal: {'STRONG' if n_good >= 5 else 'weak — treat with caution'}).")
+
+    if geojson_out:
+        gj = tiers_to_geojson(rows, date_str)
+        Path(geojson_out).write_text(json.dumps(gj))
+        print(f"\n>>> Wrote GeoJSON ({len(gj['features'])} cells) to {geojson_out}")
     return df

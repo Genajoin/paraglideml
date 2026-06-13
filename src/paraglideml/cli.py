@@ -22,7 +22,9 @@ from .config import (
 from .data.cell_analyzer import get_cell_statistics, select_quality_cells
 from .data.dataset_builder import build_multicell_dataset
 from .data.gfs_processor import run_gfs_cache_creation
-from .train import run_training_pipeline
+
+# NOTE: heavy training/NN imports (.train -> torch) are done lazily inside the commands
+# that need them, so the `paraglideml` CLI and the lean inference path start without torch.
 
 app = typer.Typer(help="Paraglideml CLI: Machine Learning for Paragliding")
 data_app = typer.Typer(help="Data processing and cache management")
@@ -218,6 +220,8 @@ def train_model(
     """
     Train the multi-regional model using the defined pipeline.
     """
+    from .train import run_training_pipeline  # lazy: pulls torch only when training
+
     print("Starting training pipeline with:")
     print(f"  Regions: {num_regions}, Epochs: {epochs}, LR: {learning_rate}, BS: {batch_size}")
 
@@ -396,27 +400,64 @@ def forecast(
 def forecast_tiers(
     date: str = typer.Option(..., "--date", help="Target date YYYY-MM-DD"),
     experiment: Optional[str] = typer.Option(
-        None, "--experiment", help="Ordinal experiment (default: latest with model_good.joblib)"
+        None, "--experiment", help="Dev: use models/experiments/<name> instead of the bundled model"
+    ),
+    model_dir: Optional[str] = typer.Option(
+        None, "--model-dir", help="Model dir override (else $PARAGLIDEML_MODEL_DIR or bundled exp_056)"
     ),
     grib_dir: Optional[str] = typer.Option(None, "--grib-dir", help="Where to download GRIB"),
     push_threshold: float = typer.Option(
         0.5, help="P(>=good) threshold for the bot's push decision in the table"
     ),
+    geojson: Optional[str] = typer.Option(
+        None, "--geojson", help="Also write the artifact (1-degree squares + tiers) to this path"
+    ),
 ):
     """
     Forecast ordinal flight-quality tiers for a date: per-spot P(>=flyable/good/epic).
 
-    Cumulative calibrated probabilities from the `train ordinal` model. The bot pushes
-    on P(>=good); great for eyeballing the tiers against what actually flew on a day.
+    Cumulative calibrated probabilities from the bundled exp_056 model (or an override).
+    The bot pushes on P(>=good); --geojson emits the map/pipeline artifact for the date.
     """
     from .predict import run_ordinal_forecast
 
     try:
         run_ordinal_forecast(
-            date_str=date, experiment=experiment, grib_dir=grib_dir, push_threshold=push_threshold
+            date_str=date, experiment=experiment, model_dir=model_dir, grib_dir=grib_dir,
+            push_threshold=push_threshold, geojson_out=geojson,
         )
     except Exception as e:
         typer.echo(f"Tier forecast failed: {e}", err=True)
+
+
+@app.command("forecast-skew")
+def forecast_skew(
+    start: str = typer.Option(..., "--start", help="Window start YYYY-MM-DD (valid days with known outcomes)"),
+    end: str = typer.Option(..., "--end", help="Window end YYYY-MM-DD"),
+    leads: str = typer.Option("1,3,5", "--leads", help="Forecast lead-times in DAYS, comma-separated"),
+    sample_every: int = typer.Option(1, "--sample-every", help="Use every Nth day in the window (cut downloads)"),
+    experiment: Optional[str] = typer.Option(None, "--experiment", help="Ordinal experiment (default: latest production)"),
+    scratch_root: Optional[str] = typer.Option(None, "--scratch", help="Where to stash forecast GRIB+cache"),
+):
+    """
+    Measure how much AP/ROC drops when the ordinal model is fed GFS *forecast*
+    lead-times (the bot's reality) instead of the *analysis* it trained on.
+
+    Downloads, for each lead L, the same valid days from the run issued L days earlier
+    and re-scores on the identical cell-days. Decides v1 deploy: ship-as-is on short
+    horizons vs forecast-aware retrain. WARNING: ~107 MB per slice, 3 slices/day/lead.
+    """
+    from .skew import run_forecast_skew
+
+    lead_list = [int(x) for x in leads.split(",") if x.strip()]
+    try:
+        run_forecast_skew(
+            start_date=start, end_date=end, leads=lead_list,
+            experiment=experiment, sample_every=sample_every, scratch_root=scratch_root,
+        )
+    except Exception as e:
+        typer.echo(f"Forecast-skew failed: {e}", err=True)
+        raise
 
 
 # =============================================================================

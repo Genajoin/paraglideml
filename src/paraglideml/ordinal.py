@@ -31,9 +31,7 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 
 from .goodxc import build_good_xc_target
 from .multiregional import MultiRegionalConfig, get_next_experiment_dir, load_and_prepare_data
-
-# (threshold_km, human label). Cumulative: each implies the tiers below.
-TIERS: List[tuple] = [(15.0, "flyable"), (50.0, "good"), (100.0, "epic")]
+from .tiers import TIERS  # single source of truth (threshold_km, label), cumulative
 
 
 def _train_tier(fit_df, val_df, test_df, feature_names, good_km, broad_min, config):

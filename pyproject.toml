@@ -15,23 +15,31 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
+# Lean core = the inference set (torch-free). `pip install paraglideml` gives a working
+# predictor from the bundled exp_056 model. Heavy training/NN/plotting libs are in [train].
 dependencies = [
     "typer",
     "numpy",
     "pandas",
     "scikit-learn",
-    # CPU-only: pip install torch --index-url https://download.pytorch.org/whl/cpu
-    "torch",
-    "xarray",
-    "cfgrib",
+    "joblib",
     "pygrib",
-    "matplotlib",
-    "seaborn",
     "tqdm",
-    "cartopy",
 ]
 
 [project.optional-dependencies]
+# Explicit alias for the lean install; the core deps above already cover inference.
+inference = []
+# Training, the NN model and plotting. CPU-only torch:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+train = [
+    "torch",
+    "xarray",
+    "cfgrib",
+    "matplotlib",
+    "seaborn",
+    "cartopy",
+]
 dev = [
     "pytest",
     "black",
@@ -46,6 +54,11 @@ paraglideml = "paraglideml.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Bundle the default model (exp_056) + spot terrain + cell list into the wheel, so
+# `pip install paraglideml` ships a self-contained predictor (~2.8 MB). See paraglideml.assets.
+[tool.setuptools.package-data]
+paraglideml = ["assets/model/*", "assets/*.json"]
 
 [tool.black]
 line-length = 100
