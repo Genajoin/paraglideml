@@ -93,6 +93,38 @@ class WeatherCache:
             dps850 = (100 - get("r_850hPa")) / 5.0
             dps700 = (100 - get("r_700hPa")) / 5.0
 
+            # --- 4. Convection / thermal proxies (previously cached but unused) ---
+            # Vertical velocity (omega, Pa/s; negative = ascent, positive = subsidence).
+            # A direct large-scale signal of convective forcing vs suppression.
+            w850 = get("w_850hPa")
+            w700 = get("w_700hPa")
+            w600 = get("w_600hPa")
+            w500 = get("w_500hPa")
+            omega_low_mean = float(
+                np.mean(
+                    [
+                        get("w_925hPa"),
+                        get("w_900hPa"),
+                        get("w_850hPa"),
+                        get("w_800hPa"),
+                        get("w_700hPa"),
+                    ]
+                )
+            )
+
+            # Surface gust (a primary flight-cancellation criterion) and visibility.
+            gust_10m = get("gust_0sfc")
+            visibility = get("vis_0sfc")
+
+            # Surface dew-point spread (cloud-base / dryness proxy), in K.
+            t2, td2 = get("2t_2m"), get("2d_2m")
+            dewpoint_spread_2m = max(0.0, t2 - td2) if (t2 > 0 and td2 > 0) else 0.0
+
+            # Low-level lapse-rate mean (boundary-layer instability proxy).
+            low_lr_keys = ["lr_925_900", "lr_900_850", "lr_850_800", "lr_800_750", "lr_750_700"]
+            low_lrs = [profile_features[k] for k in low_lr_keys if k in profile_features]
+            lapse_low_mean = float(np.mean(low_lrs)) if low_lrs else 0.0
+
             features = {
                 # Surface Anchor
                 "surface_pressure": get("sp_0sfc"),
@@ -110,6 +142,16 @@ class WeatherCache:
                 "cape": get("cape_0sfc"),
                 "cin": get("cin_0sfc"),
                 "total_cloud_cover": get("tcc_0atm"),
+                # Convection / thermal proxies
+                "w_850": w850,
+                "w_700": w700,
+                "w_600": w600,
+                "w_500": w500,
+                "omega_low_mean": omega_low_mean,
+                "gust_10m": gust_10m,
+                "visibility": visibility,
+                "dewpoint_spread_2m": dewpoint_spread_2m,
+                "lapse_low_mean": lapse_low_mean,
             }
 
             # Merge profile

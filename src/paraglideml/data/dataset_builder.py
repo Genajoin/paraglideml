@@ -117,14 +117,47 @@ def build_cell_dataset(
     # Вычисляем confidence для каждой строки
     df_target["label_confidence"] = df_target.apply(compute_label_confidence, axis=1)
 
-    # Мержим с погодными данными
+    # Мержим с погодными данными.
+    # Берём три суточных среза (06/12/18 UTC) и формируем дневные агрегаты, чтобы
+    # отразить развитие термички и суточный максимум ветра. 12 UTC остаётся опорным
+    # снимком (полный вектор фич), к нему добавляются кросс-срезовые агрегаты.
+    HOURS = (6, 12, 18)
     weather_records = []
     for date in df_target["date"]:
-        sample = cache.load_sample(cell_lat, cell_lon, date, 12)
-        if sample:
-            features = sample["features"]
-            features["date"] = date
-            weather_records.append(features)
+        samples = {h: cache.load_sample(cell_lat, cell_lon, date, h) for h in HOURS}
+        base = samples.get(12)
+        if not base:
+            continue  # требуем опорный срез 12 UTC
+
+        feats_by_hour = {h: s["features"] for h, s in samples.items() if s}
+
+        def _vals(key):
+            return [f[key] for f in feats_by_hour.values() if key in f]
+
+        record = dict(base["features"])
+
+        # Дневные максимумы опасного ветра/порывов и пиковой неустойчивости/CAPE
+        for src, dst in [
+            ("cape", "cape_daymax"),
+            ("wind_speed_850", "ws850_daymax"),
+            ("wind_speed_700", "ws700_daymax"),
+            ("gust_10m", "gust_daymax"),
+            ("lapse_low_mean", "lapse_low_daymax"),
+        ]:
+            vals = _vals(src)
+            record[dst] = max(vals) if vals else float(record.get(src, 0.0))
+
+        # Прирост CAPE с утра к полудню (накопление дневного прогрева)
+        cape_06 = feats_by_hour.get(6, {}).get("cape")
+        cape_12 = feats_by_hour.get(12, {}).get("cape")
+        record["cape_amp"] = (cape_12 - cape_06) if (cape_06 is not None and cape_12 is not None) else 0.0
+
+        # Сильнейший восходящий поток за день (наиболее отрицательная омега в нижнем слое)
+        omega_vals = _vals("omega_low_mean")
+        record["omega_low_min"] = min(omega_vals) if omega_vals else float(record.get("omega_low_mean", 0.0))
+
+        record["date"] = date
+        weather_records.append(record)
 
     if not weather_records:
         return pd.DataFrame()
