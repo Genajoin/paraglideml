@@ -215,6 +215,35 @@ def train_model(
         typer.echo(f"An error occurred during training: {e}", err=True)
 
 
+@train_app.command("baseline")
+def train_baseline(
+    experiments_dir: str = typer.Option(
+        "models/experiments", help="Directory to save experiment artifacts"
+    ),
+    learning_rate: float = typer.Option(0.05, help="Gradient boosting learning rate"),
+    max_iter: int = typer.Option(400, help="Max boosting iterations (trees)"),
+):
+    """
+    Train a gradient-boosted baseline (HistGradientBoostingClassifier) on the same
+    features and honest protocol as the NN, to establish the realistic ceiling.
+    """
+    from .baseline import run_baseline_pipeline
+
+    print("Starting gradient-boosted baseline...")
+    try:
+        exp_path = run_baseline_pipeline(
+            experiments_dir=experiments_dir,
+            learning_rate=learning_rate,
+            max_iter=max_iter,
+        )
+        print(f"\nBaseline finished. Experiment saved to: {exp_path}")
+    except FileNotFoundError as e:
+        typer.echo(f"Error: {e}", err=True)
+        typer.echo("Please ensure the dataset exists at the configured path.", err=True)
+    except Exception as e:
+        typer.echo(f"An error occurred during baseline training: {e}", err=True)
+
+
 # =============================================================================
 # ANALYZE COMMANDS
 # =============================================================================
