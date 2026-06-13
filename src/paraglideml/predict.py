@@ -140,24 +140,55 @@ def _resolve_experiment(experiment: Optional[str]) -> Path:
     return candidates[-1]
 
 
-def _fetch_and_extract(date_str: str, grib_root: Path) -> None:
-    """Download the 06/12/18 GFS slices for a date and extract per-cell NPZ cache.
+def _coerce_date(x) -> Optional[dt.date]:
+    """Accept None / 'YYYY-MM-DD' / datetime.date and return a date (or None)."""
+    if x is None:
+        return None
+    if isinstance(x, dt.date) and not isinstance(x, dt.datetime):
+        return x
+    if isinstance(x, dt.datetime):
+        return x.date()
+    return dt.datetime.strptime(str(x), "%Y-%m-%d").date()
 
-    Prefers the analysis (real conditions); if not posted yet (today/future), falls
-    back to the forecast valid at that time from the same day's 00z run. Shared by
-    the binary and ordinal forecast paths.
+
+def _fetch_and_extract(
+    date_str: str,
+    grib_root: Path,
+    run_date: Optional[dt.date] = None,
+    cache_root: Optional[Path] = None,
+) -> Path:
+    """Download the 06/12/18 GFS slices for a date, extract per-cell NPZ, return cache root.
+
+    Analysis mode (run_date None or >= target): real conditions f000, with a same-day 00z
+    forecast fallback if the analysis isn't posted yet — ideal for eyeballing a past/today
+    date. Forecast mode (run_date < target): the FORECAST valid at the target from that 00z
+    run (fxx = lead_days*24 + hour) — what the bot actually has N days ahead.
+
+    Forecast GRIB and cache are keyed by the run date (the valid-day filename alone would
+    conflate different runs), so successive runs don't clobber each other and the training
+    analysis cache stays clean. Returns the cache root the caller should read from.
     """
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
-    print(f">>> Fetching GFS for {date_str} ...")
+    grib_root = Path(grib_root)
+    cache_root = Path(cache_root) if cache_root else GFS_CACHE_DIR
+    forecast = run_date is not None and run_date < target
+    lead = (target - run_date).days if forecast else 0
+
+    if forecast:
+        grib_root = grib_root / f"run{run_date:%Y%m%d}"
+        cache_root = GFS_CACHE_DIR / "forecast" / f"run{run_date:%Y%m%d}"
+        print(f">>> Fetching GFS FORECAST for {date_str} (run {run_date:%Y-%m-%d} 00z, +{lead}d) ...")
+    else:
+        print(f">>> Fetching GFS for {date_str} (analysis) ...")
+
     sources = {}
     for hour in (6, 12, 18):
-        dest = (
-            grib_root
-            / target.strftime("%Y-%m")
-            / f"gfsanl_3_{target.strftime('%Y%m%d')}_{hour:02d}00_000.grb2"
-        )
+        dest = grib_root / target.strftime("%Y-%m") / f"gfsanl_3_{target:%Y%m%d}_{hour:02d}00_000.grb2"
         if dest.exists() and dest.stat().st_size > 0:
             sources[hour] = "cached"
+        elif forecast:
+            if download_gfs_slice(run_date, 0, dest, fxx=lead * 24 + hour):
+                sources[hour] = f"fcst(+{lead}d)"
         elif download_gfs_slice(target, hour, dest, fxx=0):
             sources[hour] = "analysis"
         elif download_gfs_slice(target, 0, dest, fxx=hour):
@@ -169,9 +200,10 @@ def _fetch_and_extract(date_str: str, grib_root: Path) -> None:
         dates=f"{date_str}:{date_str}",
         bbox="6.0,43.0,17.0,49.0",
         source_dir=grib_root,
-        output_dir=GFS_CACHE_DIR,
+        output_dir=cache_root,
         force=True,
     )
+    return cache_root
 
 
 def _feature_vector(rec: dict, feature_names: List[str], terrain_cell: Optional[dict]) -> np.ndarray:
@@ -301,27 +333,32 @@ def predict_tiers(
     model_dir: Optional[Path] = None,
     cells: Optional[List[str]] = None,
     grib_dir: Optional[str] = None,
+    run_date=None,
 ) -> List[dict]:
     """Per-cell cumulative tier probabilities for one date — the library inference API.
 
-    Returns one dict per cell: {cell, lat, lon, date, p_flyable, p_good, p_epic}, with
+    Returns one dict per cell: {cell, lat, lon, date, lead, p_flyable, p_good, p_epic}, with
     probabilities calibrated and clamped non-increasing (P>=flyable >= P>=good >= P>=epic).
     No printing — the bot / pipeline / GeoJSON builder consume the returned list.
 
     Model defaults to the bundled exp_056 (override via PARAGLIDEML_MODEL_DIR or model_dir).
-    Downloads + extracts the GFS slice for the date using the shared fetch path.
+    run_date: None/'YYYY-MM-DD'/date. If a run_date earlier than the target is given, the
+    GFS *forecast* valid at the date from that 00z run is used (lead = days ahead) — the
+    bot's reality; otherwise the analysis (real conditions, for eyeballing a past day).
     """
     mdir = Path(model_dir) if model_dir else assets.model_dir()
     feature_names, models, calibrators = _load_ordinal_models(mdir)
 
     grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
-    _fetch_and_extract(date_str, grib_root)
+    rd = _coerce_date(run_date)
+    cache_root = _fetch_and_extract(date_str, grib_root, run_date=rd)
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
+    lead = (target - rd).days if (rd and rd < target) else 0
 
     if cells is None:
         cells = json.loads(assets.cells_path().read_text())
     terrain = load_cell_terrain(str(assets.terrain_path())) or {}
-    cache = WeatherCache(cache_root=str(GFS_CACHE_DIR))
+    cache = WeatherCache(cache_root=str(cache_root))
     ts = pd.Timestamp(target)
 
     rows: List[dict] = []
@@ -334,9 +371,30 @@ def predict_tiers(
         probs = [float(calibrators[lbl].transform(models[lbl].predict_proba(x)[:, 1])[0]) for lbl in TIER_LABELS]
         for i in range(1, len(probs)):  # enforce monotonicity across tiers
             probs[i] = min(probs[i], probs[i - 1])
-        row = {"cell": cell, "lat": lat, "lon": lon, "date": date_str}
+        row = {"cell": cell, "lat": lat, "lon": lon, "date": date_str, "lead": lead}
         row.update({f"p_{lbl}": p for lbl, p in zip(TIER_LABELS, probs)})
         rows.append(row)
+    return rows
+
+
+def forecast_window(
+    run_date,
+    days: int = 3,
+    model_dir: Optional[Path] = None,
+    cells: Optional[List[str]] = None,
+    grib_dir: Optional[str] = None,
+) -> List[dict]:
+    """Multi-day artifact: tier probabilities per cell for run_date+1 .. run_date+days.
+
+    Each target day is scored from its own forecast lead-time off the run_date 00z cycle
+    (the production reality — one issue, N days ahead). Returns the concatenated per-cell
+    rows (each tagged with date + lead); feed to tiers_to_geojson for the map/R2 artifact.
+    """
+    run = _coerce_date(run_date)
+    rows: List[dict] = []
+    for lead in range(1, days + 1):
+        target = (run + dt.timedelta(days=lead)).strftime("%Y-%m-%d")
+        rows.extend(predict_tiers(target, model_dir=model_dir, cells=cells, grib_dir=grib_dir, run_date=run))
     return rows
 
 
@@ -361,6 +419,8 @@ def tiers_to_geojson(rows: List[dict], date_str: Optional[str] = None) -> dict:
         d = date_str or r.get("date")
         if d:
             props["date"] = d
+        if r.get("lead") is not None:
+            props["lead"] = int(r["lead"])
         features.append({
             "type": "Feature",
             "geometry": {"type": "Polygon", "coordinates": [ring]},

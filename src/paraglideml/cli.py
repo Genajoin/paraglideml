@@ -430,6 +430,33 @@ def forecast_tiers(
         typer.echo(f"Tier forecast failed: {e}", err=True)
 
 
+@app.command("forecast-window")
+def forecast_window_cmd(
+    run_date: str = typer.Option(..., "--run-date", help="GFS run date YYYY-MM-DD (the 00z cycle to forecast from)"),
+    days: int = typer.Option(3, "--days", help="Horizon in days: run_date+1 .. run_date+days"),
+    out: str = typer.Option(..., "--out", help="Write the multi-day GeoJSON artifact to this path"),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Model dir override (else bundled exp_056)"),
+    grib_dir: Optional[str] = typer.Option(None, "--grib-dir", help="Where to download forecast GRIB"),
+):
+    """
+    Produce the production artifact: per-cell P(>=flyable/good/epic) for the next `days`
+    days, each scored from its forecast lead-time off the run_date 00z cycle. Writes a
+    GeoJSON FeatureCollection of 1-degree squares (cells x days) — the R2 / map contract.
+    """
+    import json as _json
+
+    from .predict import forecast_window, tiers_to_geojson
+
+    try:
+        rows = forecast_window(run_date, days=days, model_dir=model_dir, grib_dir=grib_dir)
+        gj = tiers_to_geojson(rows)
+        Path(out).write_text(_json.dumps(gj))
+        typer.echo(f"Wrote {len(gj['features'])} features ({days} days x cells) to {out}")
+    except Exception as e:
+        typer.echo(f"Forecast-window failed: {e}", err=True)
+        raise
+
+
 @app.command("forecast-skew")
 def forecast_skew(
     start: str = typer.Option(..., "--start", help="Window start YYYY-MM-DD (valid days with known outcomes)"),

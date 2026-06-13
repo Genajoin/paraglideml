@@ -12,7 +12,7 @@ $PARAGLIDEML_MODEL_DIR (see paraglideml.assets). Training / NN code lives behind
 `[train]` extra and is not imported here.
 """
 
-from .predict import predict_tiers, tiers_to_geojson
+from .predict import forecast_window, predict_tiers, tiers_to_geojson
 from .tiers import TIER_LABELS, TIERS
 
-__all__ = ["predict_tiers", "tiers_to_geojson", "TIERS", "TIER_LABELS"]
+__all__ = ["predict_tiers", "forecast_window", "tiers_to_geojson", "TIERS", "TIER_LABELS"]
