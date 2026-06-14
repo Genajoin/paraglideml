@@ -156,28 +156,33 @@ def _fetch_and_extract(
     grib_root: Path,
     run_date: Optional[dt.date] = None,
     cache_root: Optional[Path] = None,
+    run_cycle: int = 0,
 ) -> Path:
     """Download the 06/12/18 GFS slices for a date, extract per-cell NPZ, return cache root.
 
-    Analysis mode (run_date None or >= target): real conditions f000, with a same-day 00z
-    forecast fallback if the analysis isn't posted yet — ideal for eyeballing a past/today
-    date. Forecast mode (run_date < target): the FORECAST valid at the target from that 00z
-    run (fxx = lead_days*24 + hour) — what the bot actually has N days ahead.
+    Analysis mode (run_date None or >= target with run_cycle 0): real conditions f000, with a
+    same-day 00z forecast fallback if the analysis isn't posted yet — ideal for eyeballing a
+    past/today date. Forecast mode (run_date < target, or run_date == target with a fresh
+    run_cycle > 0): the FORECAST valid at the target from the `run_date` `run_cycle`z run
+    (fxx = (target-run_date).days*24 + valid_hour - run_cycle) — what the bot/pipeline has from
+    the latest issued GFS cycle. A per-hour fallback to analysis / 00z covers a valid hour that
+    has already passed relative to the cycle (fxx < 0, only possible for today).
 
-    Forecast GRIB and cache are keyed by the run date (the valid-day filename alone would
-    conflate different runs), so successive runs don't clobber each other and the training
-    analysis cache stays clean. Returns the cache root the caller should read from.
+    `run_cycle` is the GFS cycle hour (0/6/12/18); the default 0 reproduces the prior 00z-only
+    behaviour exactly. Forecast GRIB and cache are keyed by run date *and cycle* (`run{YYYYMMDD}{HH}`)
+    so a 06z run never clobbers the same day's 00z cache, and the training analysis cache stays
+    clean. Returns the cache root the caller should read from.
     """
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     grib_root = Path(grib_root)
     cache_root = Path(cache_root) if cache_root else GFS_CACHE_DIR
-    forecast = run_date is not None and run_date < target
+    forecast = run_date is not None and (run_date < target or (run_date == target and run_cycle > 0))
     lead = (target - run_date).days if forecast else 0
 
     if forecast:
-        grib_root = grib_root / f"run{run_date:%Y%m%d}"
-        cache_root = GFS_CACHE_DIR / "forecast" / f"run{run_date:%Y%m%d}"
-        print(f">>> Fetching GFS FORECAST for {date_str} (run {run_date:%Y-%m-%d} 00z, +{lead}d) ...")
+        grib_root = grib_root / f"run{run_date:%Y%m%d}{run_cycle:02d}"
+        cache_root = GFS_CACHE_DIR / "forecast" / f"run{run_date:%Y%m%d}{run_cycle:02d}"
+        print(f">>> Fetching GFS FORECAST for {date_str} (run {run_date:%Y-%m-%d} {run_cycle:02d}z, +{lead}d) ...")
     else:
         print(f">>> Fetching GFS for {date_str} (analysis) ...")
 
@@ -187,8 +192,13 @@ def _fetch_and_extract(
         if dest.exists() and dest.stat().st_size > 0:
             sources[hour] = "cached"
         elif forecast:
-            if download_gfs_slice(run_date, 0, dest, fxx=lead * 24 + hour):
-                sources[hour] = f"fcst(+{lead}d)"
+            fxx = lead * 24 + hour - run_cycle  # lead == (target - run_date).days here
+            if fxx >= 0 and download_gfs_slice(run_date, run_cycle, dest, fxx=fxx):
+                sources[hour] = f"fcst({run_cycle:02d}z+{fxx}h)"
+            elif download_gfs_slice(target, hour, dest, fxx=0):
+                sources[hour] = "analysis"
+            elif download_gfs_slice(target, 0, dest, fxx=hour):
+                sources[hour] = f"forecast(00z+{hour}h)"
         elif download_gfs_slice(target, hour, dest, fxx=0):
             sources[hour] = "analysis"
         elif download_gfs_slice(target, 0, dest, fxx=hour):
@@ -334,6 +344,7 @@ def predict_tiers(
     cells: Optional[List[str]] = None,
     grib_dir: Optional[str] = None,
     run_date=None,
+    run_cycle: int = 0,
 ) -> List[dict]:
     """Per-cell cumulative tier probabilities for one date — the library inference API.
 
@@ -343,15 +354,18 @@ def predict_tiers(
 
     Model defaults to the bundled exp_056 (override via PARAGLIDEML_MODEL_DIR or model_dir).
     run_date: None/'YYYY-MM-DD'/date. If a run_date earlier than the target is given, the
-    GFS *forecast* valid at the date from that 00z run is used (lead = days ahead) — the
-    bot's reality; otherwise the analysis (real conditions, for eyeballing a past day).
+    GFS *forecast* valid at the date from that run is used (lead = days ahead) — the bot's
+    reality; otherwise the analysis (real conditions, for eyeballing a past day).
+    run_cycle: GFS cycle hour (0/6/12/18). Default 0 = the 00z cycle (prior behaviour, 1:1).
+    Pass 6/12/18 to score today's forecast from the freshest issued cycle (FlyBeeper refreshes
+    every 6h); with run_date == today and run_cycle > 0 the target day is fetched as a forecast.
     """
     mdir = Path(model_dir) if model_dir else assets.model_dir()
     feature_names, models, calibrators = _load_ordinal_models(mdir)
 
     grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
     rd = _coerce_date(run_date)
-    cache_root = _fetch_and_extract(date_str, grib_root, run_date=rd)
+    cache_root = _fetch_and_extract(date_str, grib_root, run_date=rd, run_cycle=run_cycle)
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     lead = (target - rd).days if (rd and rd < target) else 0
 
@@ -383,18 +397,24 @@ def forecast_window(
     model_dir: Optional[Path] = None,
     cells: Optional[List[str]] = None,
     grib_dir: Optional[str] = None,
+    run_cycle: int = 0,
+    start_lead: int = 1,
 ) -> List[dict]:
-    """Multi-day artifact: tier probabilities per cell for run_date+1 .. run_date+days.
+    """Multi-day artifact: tier probabilities per cell for run_date+start_lead .. run_date+days.
 
-    Each target day is scored from its own forecast lead-time off the run_date 00z cycle
-    (the production reality — one issue, N days ahead). Returns the concatenated per-cell
+    Each target day is scored from its own forecast lead-time off the run_date `run_cycle`z
+    cycle (the production reality — one issue, N days ahead). Returns the concatenated per-cell
     rows (each tagged with date + lead); feed to tiers_to_geojson for the map/R2 artifact.
+
+    run_cycle: GFS cycle hour (0/6/12/18); default 0 = 00z (prior behaviour). start_lead: first
+    lead day; default 1 (tomorrow onward). Pass start_lead=0 to also include today, scored from
+    the fresh `run_cycle`z cycle — the 6-hourly refresh path. Defaults (0, 1) reproduce 1:1.
     """
     run = _coerce_date(run_date)
     rows: List[dict] = []
-    for lead in range(1, days + 1):
+    for lead in range(start_lead, days + 1):
         target = (run + dt.timedelta(days=lead)).strftime("%Y-%m-%d")
-        rows.extend(predict_tiers(target, model_dir=model_dir, cells=cells, grib_dir=grib_dir, run_date=run))
+        rows.extend(predict_tiers(target, model_dir=model_dir, cells=cells, grib_dir=grib_dir, run_date=run, run_cycle=run_cycle))
     return rows
 
 
