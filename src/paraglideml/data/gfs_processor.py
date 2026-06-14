@@ -127,6 +127,13 @@ def process_grib_pygrib(
         grbs.close()
         return None
 
+    # message(1) above advanced the iterator past the first message; rewind so the
+    # extraction loop also sees it. In full archive files the first message wasn't an
+    # extracted field, but in byte-range partial files it's the lowest-offset wanted
+    # message (VIS:surface in GFS pgrb2) — without this rewind `visibility` is silently
+    # dropped (reads as 0) on every forecast/byte-range run.
+    grbs.seek(0)
+
     for grb in grbs:
         name = grb.name
         short_name = grb.shortName
