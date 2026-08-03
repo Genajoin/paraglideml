@@ -125,6 +125,51 @@ class WeatherCache:
             low_lrs = [profile_features[k] for k in low_lr_keys if k in profile_features]
             lapse_low_mean = float(np.mean(low_lrs)) if low_lrs else 0.0
 
+            # --- 5. Convective / thunderstorm-potential indices ---
+            # Computed from the cached T/RH profile — NO new GFS fields needed. The model
+            # already has CAPE/CIN/lapse (the instability ingredients); these add mid-level
+            # moisture and storm-organisation signals that separate "good thermals" from
+            # "overdevelops into thunderstorms" — the convective-false-positive failure mode
+            # where flyable reads high on a day that actually storms out / is dangerous.
+            def _tc(level):  # air temperature (deg C) at a pressure level, or None if missing
+                t = v.get(f"t_{level}hPa")
+                return (t - 273.15) if (t is not None and t > 150) else None
+
+            def _td(level):  # dewpoint (deg C) from T and RH via Magnus, or None if missing
+                t, rh = v.get(f"t_{level}hPa"), v.get(f"r_{level}hPa")
+                if t is None or rh is None or t <= 150 or rh <= 0:
+                    return None
+                tc = t - 273.15
+                rh = min(max(rh, 1.0), 100.0)
+                g = np.log(rh / 100.0) + (17.625 * tc) / (243.04 + tc)
+                return 243.04 * g / (17.625 - g)
+
+            t850c, t700c, t500c = _tc(850), _tc(700), _tc(500)
+            td850c, td700c = _td(850), _td(700)
+            if None not in (t850c, t700c, t500c, td850c, td700c):
+                vertical_totals = t850c - t500c          # mid-level lapse component
+                cross_totals = td850c - t500c            # low-level moisture component
+                total_totals = vertical_totals + cross_totals  # severe-storm index
+                k_index = (t850c - t500c) + td850c - (t700c - td700c)  # thunderstorm/moisture
+            else:
+                vertical_totals = cross_totals = total_totals = k_index = 0.0
+
+            # Mid-level RH (700-500 hPa): moist mid-levels fuel overdevelopment;
+            # dry mid-levels give safe "blue" thermals.
+            mid_rhs = [v.get(f"r_{p}hPa") for p in (700, 600, 500)]
+            mid_rhs = [r for r in mid_rhs if r is not None and r > 0]
+            mid_rh = float(np.mean(mid_rhs)) if mid_rhs else 0.0
+
+            # Deep bulk shear surface->500 hPa (storm organisation / gust-front potential),
+            # and CAPE x shear (an energy-shear severity proxy).
+            u500, v500 = v.get("u_500hPa"), v.get("v_500hPa")
+            deep_shear = (
+                float(np.sqrt((u500 - u10) ** 2 + (v500 - v10) ** 2))
+                if (u500 is not None and v500 is not None)
+                else 0.0
+            )
+            cape_shear = get("cape_0sfc") * deep_shear
+
             features = {
                 # Surface Anchor
                 "surface_pressure": get("sp_0sfc"),
@@ -152,6 +197,13 @@ class WeatherCache:
                 "visibility": visibility,
                 "dewpoint_spread_2m": dewpoint_spread_2m,
                 "lapse_low_mean": lapse_low_mean,
+                # Convection / thunderstorm-potential indices (overdevelopment signal)
+                "k_index": k_index,
+                "total_totals": total_totals,
+                "cross_totals": cross_totals,
+                "mid_rh": mid_rh,
+                "deep_shear": deep_shear,
+                "cape_shear": cape_shear,
             }
 
             # Merge profile

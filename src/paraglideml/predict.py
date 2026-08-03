@@ -14,7 +14,9 @@ True multi-day forecasting (lead times f024..f120) is a later addition.
 
 import datetime as dt
 import json
+import os
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -34,6 +36,10 @@ from .tiers import TIER_LABELS
 # library inference path (predict_tiers) stays torch-free — `paraglideml[inference]`.
 
 S3_BASE = "https://noaa-gfs-bdp-pds.s3.amazonaws.com"
+
+# Concurrent byte-range connections per slice. 8 measured ~45 MB/s against S3;
+# 16 was slower (throttling), 1 gives ~1.6 MB/s. Override for a fatter pipe.
+RANGE_FETCH_WORKERS = int(os.getenv("PARAGLIDEML_RANGE_WORKERS", "8"))
 
 # Which GRIB messages the model needs, expressed as (.idx VAR, level) selectors.
 _PRESSURE_VARS = {"TMP", "HGT", "RH", "UGRD", "VGRD", "VVEL"}
@@ -111,16 +117,24 @@ def download_gfs_slice(date: dt.date, hour: int, dest: Path, fxx: int = 0) -> bo
         else:
             merged.append([s, e])
 
+    # Fetch the ranges concurrently, then write them back in offset order. The ~66
+    # ranges of a slice are latency-bound, not bandwidth-bound: serially they run at
+    # ~1.6 MB/s (~65 s per 100 MB slice), with 8 connections at ~45 MB/s. Order matters
+    # — pygrib reads the partial file as a GRIB stream, so messages must stay ascending.
+    def _fetch(rng_pair):
+        s, e = rng_pair
+        rng = f"bytes={s}-{e}" if e is not None else f"bytes={s}-"
+        req = urllib.request.Request(base, headers={"Range": rng})
+        with urllib.request.urlopen(req, timeout=300) as r:
+            return r.read()
+
     dest.parent.mkdir(parents=True, exist_ok=True)
-    total = 0
+    with ThreadPoolExecutor(max_workers=RANGE_FETCH_WORKERS) as ex:
+        chunks = list(ex.map(_fetch, merged))
+    total = sum(len(c) for c in chunks)
     with open(dest, "wb") as f:
-        for s, e in merged:
-            rng = f"bytes={s}-{e}" if e is not None else f"bytes={s}-"
-            req = urllib.request.Request(base, headers={"Range": rng})
-            with urllib.request.urlopen(req, timeout=300) as r:
-                chunk = r.read()
-                f.write(chunk)
-                total += len(chunk)
+        for chunk in chunks:
+            f.write(chunk)
     print(f"  [{ymd} {hour:02d}z] downloaded {total / 1e6:.1f} MB ({len(merged)} ranges)")
     return True
 
@@ -157,6 +171,7 @@ def _fetch_and_extract(
     run_date: Optional[dt.date] = None,
     cache_root: Optional[Path] = None,
     run_cycle: int = 0,
+    cells: Optional[List[str]] = None,
 ) -> Path:
     """Download the 06/12/18 GFS slices for a date, extract per-cell NPZ, return cache root.
 
@@ -205,10 +220,20 @@ def _fetch_and_extract(
             sources[hour] = f"forecast(00z+{hour}h)"
     print(f"  slices: {sources}")
 
+    # Extraction bbox follows the cells actually being scored. It used to be the
+    # hardcoded Alpine box, which silently dropped every cell outside it — with the
+    # 132-cell European set that was 85 cells returning no features at all.
+    if cells:
+        lats = [int(c.split("_")[0]) for c in cells]
+        lons = [int(c.split("_")[1]) for c in cells]
+        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
+    else:
+        bbox = "6.0,43.0,17.0,49.0"
+
     print(">>> Extracting features to cache ...")
     run_gfs_cache_creation(
         dates=f"{date_str}:{date_str}",
-        bbox="6.0,43.0,17.0,49.0",
+        bbox=bbox,
         source_dir=grib_root,
         output_dir=cache_root,
         force=True,
@@ -365,12 +390,14 @@ def predict_tiers(
 
     grib_root = Path(grib_dir) if grib_dir else GFS_FORECAST_DIR
     rd = _coerce_date(run_date)
-    cache_root = _fetch_and_extract(date_str, grib_root, run_date=rd, run_cycle=run_cycle)
+    if cells is None:
+        cells = json.loads(assets.cells_path().read_text())
+    cache_root = _fetch_and_extract(
+        date_str, grib_root, run_date=rd, run_cycle=run_cycle, cells=cells
+    )
     target = dt.datetime.strptime(date_str, "%Y-%m-%d").date()
     lead = (target - rd).days if (rd and rd < target) else 0
 
-    if cells is None:
-        cells = json.loads(assets.cells_path().read_text())
     terrain = load_cell_terrain(str(assets.terrain_path())) or {}
     cache = WeatherCache(cache_root=str(cache_root))
     ts = pd.Timestamp(target)

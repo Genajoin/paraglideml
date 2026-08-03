@@ -123,13 +123,19 @@ def run_backtest(
     is later trained on all years with no holdout. AP/ROC are threshold-free, so no
     per-fold validation split is needed; GBM uses internal early stopping.
     """
-    from .multiregional import MultiRegionalConfig, cluster_regions, feature_columns
+    from .multiregional import (
+        MultiRegionalConfig,
+        cluster_regions,
+        feature_columns,
+        resolve_num_regions,
+    )
 
     config = MultiRegionalConfig()
     df = pd.read_csv(config.data_path)
     df["date"] = pd.to_datetime(df["date"])
     df["year"] = df["date"].dt.year
-    region_mapping = cluster_regions(df, n_clusters=config.num_regions, random_state=config.random_seed)
+    n_regions = resolve_num_regions(int(df["cell_id"].nunique()), floor=config.num_regions)
+    region_mapping = cluster_regions(df, n_clusters=n_regions, random_state=config.random_seed)
     df["region_id"] = df["cell_id"].map(region_mapping)
     feats = feature_columns(df)
     years = sorted(int(y) for y in df["year"].unique())

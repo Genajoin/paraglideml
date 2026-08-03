@@ -17,7 +17,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from paraglideml.data.flight_parsing import load_flights_to_dataframe
+from paraglideml.data.dataset_builder import SEASON_END, SEASON_START
+from paraglideml.data.flight_parsing import load_flights_to_dataframe, load_world_flights
 from paraglideml.data.weather_cache import WeatherCache
 
 
@@ -110,17 +111,24 @@ def check_weather_coverage(
     cell_lat: int,
     cell_lon: int,
     cache: WeatherCache,
-    years: List[int] = [2021, 2022, 2023, 2024, 2025],
+    years: Optional[List[int]] = None,
+    season: Tuple[Tuple[int, int], Tuple[int, int]] = (SEASON_START, SEASON_END),
 ) -> float:
     """
     Проверяет покрытие погодными данными для ячейки.
 
     Returns:
-        float: процент дней с данными (0-100) в сезоне май-сентябрь
+        float: процент дней с данными (0-100) в сезонном окне
     """
+    if years is None:
+        years = [2021, 2022, 2023, 2024, 2025, 2026]
+    (s_month, s_day), (e_month, e_day) = season
     target_dates = []
     for y in years:
-        rng = pd.date_range(f"{y}-05-15", f"{y}-09-15")
+        rng = pd.date_range(
+            pd.Timestamp(year=y, month=s_month, day=s_day),
+            pd.Timestamp(year=y, month=e_month, day=e_day),
+        )
         target_dates.extend(rng)
 
     available_count = 0
@@ -139,6 +147,8 @@ def get_cell_statistics(
     output_path: str = "data/processed/cell_quality.csv",
     bbox: Optional[str] = None,
     min_xc_points: int = 10,
+    flights_source: str = "world",
+    flights_cache: Optional[str] = "data/processed/world_flights.pkl",
 ) -> pd.DataFrame:
     """
     Анализирует все доступные ячейки.
@@ -155,7 +165,12 @@ def get_cell_statistics(
         DataFrame с метриками для каждой ячейки
     """
     print("Загружаю все полёты...")
-    df_flights = load_flights_to_dataframe(data_dir=flights_dir)
+    if flights_source == "world":
+        df_flights = load_world_flights(
+            data_dir=flights_dir, bbox=bbox, cache_path=flights_cache
+        )
+    else:
+        df_flights = load_flights_to_dataframe(data_dir=flights_dir)
 
     # Парсим bbox если указан
     lon_min, lat_min, lon_max, lat_max = None, None, None, None

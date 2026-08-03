@@ -351,6 +351,26 @@ class RegionalFlyableDataset(Dataset):
 # =============================================================================
 
 
+# Target cells per region. Regions are the consensus neighbourhood of
+# build_good_xc_target, so what has to stay stable as the cell set grows is their
+# size, not their count: 45 Alpine cells / 3 regions = the 15 behind the published
+# scores.
+CELLS_PER_REGION = 15
+
+
+def resolve_num_regions(n_cells: int, floor: int = 3) -> int:
+    """
+    Region count for `n_cells`, keeping regions at roughly CELLS_PER_REGION each.
+
+    A region is not just an embedding bucket: build_good_xc_target polls it for the
+    "did neighbouring cells also fly far today" consensus. Holding the count fixed
+    while the cell set grows from the Alps to a European belt would stretch one
+    region to ~1500 km and let a good day in Spain vote on a Romanian cell. The
+    configured count stays the floor, so the 45-cell Alpine setup still gets 3.
+    """
+    return max(floor, round(n_cells / CELLS_PER_REGION))
+
+
 def cluster_regions(
     df: pd.DataFrame, n_clusters: int = 5, random_state: int = 42
 ) -> Dict[str, int]:
@@ -452,8 +472,15 @@ def load_and_prepare_data(
     test_df = df[df["year"] == test_year].copy()
     print(f"Temporal split: train < {test_year}, test == {test_year}")
 
-    # Geographical clustering
-    print(f"Performing geographical clustering into {config.num_regions} regions...")
+    # Geographical clustering. The resolved count is written back into the config so
+    # the model's region embedding is built at the same size and the saved run config
+    # records what was actually used (see resolve_num_regions).
+    n_cells = int(train_df["cell_id"].nunique())
+    config.num_regions = resolve_num_regions(n_cells, floor=config.num_regions)
+    print(
+        f"Performing geographical clustering into {config.num_regions} regions "
+        f"({n_cells} cells)..."
+    )
     region_mapping = cluster_regions(
         train_df, n_clusters=config.num_regions, random_state=config.random_seed
     )

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Optional
 
@@ -175,6 +176,47 @@ def data_build(
         cache_root=str(cache_dir),
         output_path=str(output_path),
         min_xc_points=min_xc_points,
+    )
+
+
+@data_app.command("backfill")
+def data_backfill(
+    start: str = typer.Option(..., "--start", help="Window start YYYY-MM-DD"),
+    end: str = typer.Option(..., "--end", help="Window end YYYY-MM-DD (inclusive)"),
+    months: str = typer.Option("3,4,5,6,7,8,9,10", help="Months to fill, comma-separated"),
+    extract_cells: Path = typer.Option(
+        PROCESSED_DATA_DIR / "extract_cells.json", help="JSON list of cells to extract"
+    ),
+    cache_dir: Path = typer.Option(GFS_CACHE_DIR, help="Weather cache root to fill"),
+    archive_dir: Optional[Path] = typer.Option(
+        None, "--archive-dir", help="Keep raw GRIB here (~105 MB/slice) instead of deleting"
+    ),
+    workers: int = typer.Option(3, help="Slices downloaded/extracted in parallel"),
+):
+    """
+    Backfill the GFS analysis cache over a date window (fetch -> extract -> keep/drop GRIB).
+
+    Traffic depends only on the number of (date, hour) slices — ~105 MB each, three
+    per day — not on the cell count, since each slice carries global GRIB fields.
+    Resumable: slices already satisfied are skipped.
+
+    With --archive-dir the raw GRIB is kept (put it on a spinning disk: a full
+    March-October 2021-2026 window is ~434 GB). That is what makes a later region
+    expansion free — new cells re-extract off the archive via `data gfs`, with no
+    download. Without it, only the cells chosen today survive, and widening the
+    region later means pulling all ~434 GB again.
+    """
+    from .data.backfill import run_backfill
+
+    cells = json.loads(Path(extract_cells).read_text()) if Path(extract_cells).exists() else None
+    run_backfill(
+        start=start,
+        end=end,
+        cells=cells,
+        months=tuple(int(m) for m in months.split(",")),
+        cache_root=cache_dir,
+        archive_root=archive_dir,
+        workers=workers,
     )
 
 

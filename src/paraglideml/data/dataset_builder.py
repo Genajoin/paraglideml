@@ -8,12 +8,12 @@
 """
 
 import json
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 from tqdm import tqdm
 
-from paraglideml.data.flight_parsing import load_flights_to_dataframe
+from paraglideml.data.flight_parsing import load_flights_to_dataframe, load_world_flights
 from paraglideml.data.weather_cache import WeatherCache
 
 
@@ -56,6 +56,14 @@ def compute_label_confidence(row: pd.Series) -> float:
 
 FORECAST_HOURS = (6, 12, 18)
 
+# Training season window, as (start month-day, end month-day). The historical
+# default was 15 May - 15 Sep, which matched the weather cache rather than the
+# flying: in the Alps cells April alone yields more >=50 km flights than July,
+# and March more than September. Widened to 1 Mar - 31 Oct once the GFS cache
+# covers it; override per call for a cell whose season sits elsewhere.
+SEASON_START = (3, 1)
+SEASON_END = (10, 31)
+
 
 def compute_day_features(
     cache: WeatherCache, cell_lat: int, cell_lon: int, date: pd.Timestamp
@@ -87,6 +95,10 @@ def compute_day_features(
         ("wind_speed_700", "ws700_daymax"),
         ("gust_10m", "gust_daymax"),
         ("lapse_low_mean", "lapse_low_daymax"),
+        # Peak convective / storm potential reached during the day
+        ("k_index", "k_index_daymax"),
+        ("total_totals", "total_totals_daymax"),
+        ("cape_shear", "cape_shear_daymax"),
     ]:
         vals = _vals(src)
         record[dst] = max(vals) if vals else float(record.get(src, 0.0))
@@ -115,6 +127,7 @@ def build_cell_dataset(
     cell_terrain: Optional[dict] = None,
     available_years: Optional[List[int]] = None,
     data_max_date: Optional[pd.Timestamp] = None,
+    season: Tuple[Tuple[int, int], Tuple[int, int]] = (SEASON_START, SEASON_END),
 ) -> pd.DataFrame:
     """
     Создаёт датасет для одной ячейки.
@@ -170,15 +183,16 @@ def build_cell_dataset(
     )
     daily_flights.rename(columns={"date_only": "date"}, inplace=True)
 
-    # Создаём target timeline (сезон 15 мая - 15 сентября). Для текущего/частичного
-    # года обрезаем конец по последней дате данных — иначе будущие дни без полётов
-    # стали бы ложными «нелётными» нулями.
+    # Создаём target timeline по сезонному окну (по умолчанию 1 марта - 31 октября).
+    # Для текущего/частичного года обрезаем конец по последней дате данных — иначе
+    # будущие дни без полётов стали бы ложными «нелётными» нулями.
     if available_years is None:
         available_years = [2021, 2022, 2023, 2024, 2025]
+    (s_month, s_day), (e_month, e_day) = season
     target_dates = []
     for y in available_years:
-        season_start = pd.Timestamp(f"{y}-05-15")
-        season_end = pd.Timestamp(f"{y}-09-15")
+        season_start = pd.Timestamp(year=y, month=s_month, day=s_day)
+        season_end = pd.Timestamp(year=y, month=e_month, day=e_day)
         if data_max_date is not None:
             season_end = min(season_end, pd.Timestamp(data_max_date))
         if season_start > season_end:
@@ -241,6 +255,9 @@ def build_multicell_dataset(
     selected_cells_path: str = "data/processed/selected_cells.json",
     output_path: str = "data/processed/multicell_dataset.csv",
     min_xc_points: int = 10,
+    flights_source: str = "world",
+    flights_cache: Optional[str] = "data/processed/world_flights.pkl",
+    season: Tuple[Tuple[int, int], Tuple[int, int]] = (SEASON_START, SEASON_END),
 ) -> pd.DataFrame:
     """
     Создаёт объединённый датасет из нескольких ячеек.
@@ -253,6 +270,10 @@ def build_multicell_dataset(
         selected_cells_path: путь к JSON со списком ячеек
         output_path: путь для сохранения CSV
         min_xc_points: минимальные баллы XContest для качественного XC полёта
+        flights_source: 'world' — мировой экспорт 2006-2026 (полный год, координаты
+                        на каждый полёт); 'legacy' — старые xcontest_flights_*.json
+        flights_cache: pickle-кэш разобранного мирового экспорта (None — не кэшировать)
+        season: сезонное окно ((месяц, день) начала, (месяц, день) конца)
 
     Returns:
         pd.DataFrame с объединённым датасетом
@@ -263,7 +284,15 @@ def build_multicell_dataset(
             cells = json.load(f)
 
     print("Загружаю полёты...")
-    df_flights = load_flights_to_dataframe(data_dir=flights_dir)
+    if flights_source == "world":
+        # Ограничиваем разбор bbox'ом выбранных ячеек: мировой экспорт — 5M полётов
+        # в 15.5k файлах, а нужна лишь горстка ячеек.
+        lats = [int(c.split("_")[0]) for c in cells]
+        lons = [int(c.split("_")[1]) for c in cells]
+        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
+        df_flights = load_world_flights(data_dir=flights_dir, bbox=bbox, cache_path=flights_cache)
+    else:
+        df_flights = load_flights_to_dataframe(data_dir=flights_dir)
 
     print("Инициализирую weather cache...")
     cache = WeatherCache(cache_root=cache_root)
@@ -290,7 +319,7 @@ def build_multicell_dataset(
     for cell_id in tqdm(cells, desc="Обработка ячеек"):
         cell_df = build_cell_dataset(
             cell_id, df_flights, cache, min_xc_points, cell_terrain,
-            available_years=available_years, data_max_date=data_max_date,
+            available_years=available_years, data_max_date=data_max_date, season=season,
         )
         if not cell_df.empty:
             all_datasets.append(cell_df)

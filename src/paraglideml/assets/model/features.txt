@@ -20,6 +20,12 @@ gust_10m
 visibility
 dewpoint_spread_2m
 lapse_low_mean
+k_index
+total_totals
+cross_totals
+mid_rh
+deep_shear
+cape_shear
 ws_1000
 lr_1000_975
 ws_975
@@ -46,6 +52,9 @@ ws850_daymax
 ws700_daymax
 gust_daymax
 lapse_low_daymax
+k_index_daymax
+total_totals_daymax
+cape_shear_daymax
 cape_amp
 omega_low_min
 elevation
