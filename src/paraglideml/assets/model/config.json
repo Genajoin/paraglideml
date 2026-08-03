@@ -3,27 +3,27 @@
   "tiers": {
     "flyable": {
       "km": 15.0,
-      "base_rate": 0.334008400840084,
-      "average_precision": 0.8438674866816459,
-      "roc_auc": 0.9123553389031216,
-      "brier": 0.11117790735472362
+      "base_rate": 0.33432102334321023,
+      "average_precision": 0.8369840499272795,
+      "roc_auc": 0.9069753226970723,
+      "brier": 0.1142068999560597
     },
     "good": {
       "km": 50.0,
-      "base_rate": 0.17716771677167717,
-      "average_precision": 0.7457333985523533,
-      "roc_auc": 0.9242384742624217,
-      "brier": 0.07800007845541927
+      "base_rate": 0.17489340174893403,
+      "average_precision": 0.737792991539701,
+      "roc_auc": 0.9207474065425127,
+      "brier": 0.07868253609606203
     },
     "epic": {
       "km": 100.0,
-      "base_rate": 0.08828382838283828,
-      "average_precision": 0.6948402675755418,
-      "roc_auc": 0.9504495354712758,
-      "brier": 0.04232772791234076
+      "base_rate": 0.0863626508636265,
+      "average_precision": 0.6849119491042107,
+      "roc_auc": 0.948476685604669,
+      "brier": 0.04235897999971582
     }
   },
-  "monotonicity_clamp_rate": 0.04642964296429643,
+  "monotonicity_clamp_rate": 0.025800390258003902,
   "broad_min": 5,
   "num_features": 61,
   "production": true,
