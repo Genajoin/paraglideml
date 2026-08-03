@@ -9,7 +9,7 @@ retrain). Weights live as data, versioned and deployed independently of the pack
 
   PARAGLIDEML_MODEL_DIR      -> dir with model_{flyable,good,epic}.joblib + calibrator_* + features.txt
   PARAGLIDEML_CELL_TERRAIN   -> cell_terrain.json (spot-centric elevation / mountainess)
-  PARAGLIDEML_SELECTED_CELLS -> selected_cells.json (the 1-degree cells to score)
+  PARAGLIDEML_SELECTED_CELLS -> selected_cells.json (the cells to score)
 """
 
 import os

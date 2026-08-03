@@ -1,144 +1,123 @@
 """
-Анализ качества ячеек для мульти-ячеечного обучения.
+Анализ качества ячеек и ОТБОР ячеек для обучения.
 
-Для каждой ячейки вычисляет:
-- total_flights: общее количество полётов
-- flyable_days: дней с flight_count >= 3
-- weather_coverage: % дней с погодными данными (май-сентябрь)
-- years_available: список годов с данными
-- quality_score: метрика качества для сортировки
+Отбор идёт по одним полётам — погодного кэша для новой ячейки ещё не существует,
+и требовать его значило бы уметь отбирать только то, что уже извлечено. Ячейка
+проходит, если в сезонном окне с SELECT_FROM_YEAR набралось достаточно:
+
+- quality_days: дней хотя бы с одним качественным полётом (points >= min_xc_points)
+- good_days:    дней с полётом >= GOOD_DISTANCE_KM — метка модели вырождена там,
+                где полёт такой длины почти не случается, сколько бы ни было взлётов
+- sites:        разных стартов — одна гора это не ячейка, а одна гора
+
+Пороги заданы НА ГРАДУС ШИРОТЫ и умножаются на LAT_STEP: они считают дни, а не
+плотность, поэтому при уменьшении ячейки планка иначе поднялась бы сама собой, без
+всякой связи с качеством данных. На сетке 1° это ровно те 150/60, которыми отобран
+прод; на 0.75 — 112/45.
 """
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
-import numpy as np
 import pandas as pd
-from tqdm import tqdm
 
 from paraglideml.data.dataset_builder import SEASON_END, SEASON_START
 from paraglideml.data.flight_parsing import load_flights_to_dataframe, load_world_flights
 from paraglideml.data.weather_cache import WeatherCache
+from paraglideml.grid import LAT_STEP, cell_bounds
+from paraglideml.grid import cell_id as make_cell_id
+
+# Критерии отбора, на градус широты (см. модульную строку документации).
+QUALITY_DAYS_PER_DEG = 150.0
+GOOD_DAYS_PER_DEG = 60.0
+MIN_SITES = 3  # НЕ масштабируется: это порог разнообразия, а не объёма
+GOOD_DISTANCE_KM = 50.0
+SELECT_FROM_YEAR = 2021
+
+MIN_QUALITY_DAYS = int(round(QUALITY_DAYS_PER_DEG * LAT_STEP))
+MIN_GOOD_DAYS = int(round(GOOD_DAYS_PER_DEG * LAT_STEP))
 
 
-def get_cell_from_coords(lat: float, lon: float) -> Tuple[int, int]:
-    """Преобразует координаты в идентификатор ячейки."""
-    return int(np.floor(lat)), int(np.floor(lon))
+def get_cell_from_coords(lat: float, lon: float) -> Tuple[float, float]:
+    """Якорь (юго-западный угол) ячейки, содержащей точку."""
+    lat0, lon0, _, _ = cell_bounds(make_cell_id(lat, lon))
+    return lat0, lon0
 
 
-def analyze_cell_flights(
-    df_flights: pd.DataFrame, cell_lat: int, cell_lon: int, min_xc_points: int = 10
-) -> Dict:
+def cell_flight_stats(
+    df_flights: pd.DataFrame,
+    season: Tuple[Tuple[int, int], Tuple[int, int]] = (SEASON_START, SEASON_END),
+    from_year: int = SELECT_FROM_YEAR,
+    min_xc_points: int = 10,
+) -> pd.DataFrame:
     """
-    Анализирует полёты в одной ячейке.
+    Метрики отбора по каждой ячейке, где вообще были полёты.
 
-    Args:
-        df_flights: DataFrame со всеми полётами
-        cell_lat, cell_lon: координаты ячейки
-        min_xc_points: минимальные баллы XContest для качественного XC полёта
-
-    Returns:
-        Dict с метриками ячейки
+    Одна группировка по всему кадру вместо прохода по ячейкам: на мировом экспорте
+    (5M полётов) поячеечная фильтрация — это часы, группировка — секунды.
     """
-    # Фильтруем полёты в границах ячейки (±0.5° от центра)
-    cell_center_lat = cell_lat + 0.5
-    cell_center_lon = cell_lon + 0.5
-    TOLERANCE = 0.5
+    df = df_flights.dropna(subset=["takeoff_lat", "takeoff_lon"]).copy()
+    df["day"] = pd.to_datetime(df["date"]).dt.tz_localize(None).dt.normalize()
+    (s_month, _), (e_month, _) = season
+    df = df[(df["day"].dt.year >= from_year) & (df["day"].dt.month.between(s_month, e_month))]
+    if df.empty:
+        return pd.DataFrame()
 
-    df_geo = df_flights.dropna(subset=["takeoff_lat", "takeoff_lon"])
-    df_cell = df_geo[
-        (df_geo["takeoff_lat"].between(cell_center_lat - TOLERANCE, cell_center_lat + TOLERANCE))
-        & (df_geo["takeoff_lon"].between(cell_center_lon - TOLERANCE, cell_center_lon + TOLERANCE))
-    ].copy()
+    df["cell_id"] = [
+        make_cell_id(la, lo) for la, lo in zip(df["takeoff_lat"], df["takeoff_lon"])
+    ]
 
-    if len(df_cell) == 0:
-        return {
-            "cell_id": f"{cell_lat}_{cell_lon}",
-            "cell_lat": cell_lat,
-            "cell_lon": cell_lon,
-            "total_flights": 0,
-            "flyable_days": 0,
-            "unique_days": 0,
-            "years_available": [],
-            "avg_flights_per_flyable_day": 0.0,
-        }
+    site_col = "takeoff_name" if "takeoff_name" in df.columns else "takeoff_lat"
+    q = df[df["points"] >= min_xc_points] if min_xc_points > 0 else df
+    if q.empty:
+        return pd.DataFrame()
 
-    # Фильтруем по качеству XC (баллы XContest)
-    if min_xc_points > 0:
-        df_cell = df_cell[df_cell["points"] >= min_xc_points].copy()
-        if len(df_cell) == 0:
-            return {
-                "cell_id": f"{cell_lat}_{cell_lon}",
-                "cell_lat": cell_lat,
-                "cell_lon": cell_lon,
-                "total_flights": 0,
-                "flyable_days": 0,
-                "unique_days": 0,
-                "years_available": [],
-                "avg_flights_per_flyable_day": 0.0,
-            }
+    g = q.groupby("cell_id").agg(
+        total_flights=("day", "size"),
+        quality_days=("day", "nunique"),
+        sites=(site_col, "nunique"),
+        pilots=("pilot_id", "nunique"),
+    )
+    good = q[q["distance"] >= GOOD_DISTANCE_KM].groupby("cell_id")["day"].nunique()
+    g["good_days"] = good.reindex(g.index).fillna(0).astype(int)
+    g["years"] = q.groupby("cell_id")["day"].agg(lambda s: s.dt.year.nunique()).reindex(g.index)
 
-    # Агрегация по дням
-    df_cell["date_only"] = pd.to_datetime(df_cell["date"]).dt.tz_localize(None).dt.normalize()
-    daily_flights = df_cell.groupby("date_only").agg(flight_count=("id", "count")).reset_index()
-
-    # После фильтрации по качеству: 1+ качественный полёт = летный день
-    flyable_days = (daily_flights["flight_count"] >= 1).sum()
-    total_flights = len(df_cell)
-    unique_days = len(daily_flights)
-
-    # Годы с данными
-    years = sorted(df_cell["date"].dt.year.unique().tolist())
-
-    # Средняя интенсивность в лётные дни
-    flyable_subset = daily_flights[daily_flights["flight_count"] >= 1]
-    avg_flights = flyable_subset["flight_count"].mean() if len(flyable_subset) > 0 else 0.0
-
-    return {
-        "cell_id": f"{cell_lat}_{cell_lon}",
-        "cell_lat": cell_lat,
-        "cell_lon": cell_lon,
-        "total_flights": total_flights,
-        "flyable_days": flyable_days,
-        "unique_days": unique_days,
-        "years_available": years,
-        "avg_flights_per_flyable_day": avg_flights,
-    }
+    g = g.reset_index()
+    anchors = [cell_bounds(c) for c in g["cell_id"]]
+    g["cell_lat"] = [a[0] for a in anchors]
+    g["cell_lon"] = [a[1] for a in anchors]
+    g["passes"] = (
+        (g["quality_days"] >= MIN_QUALITY_DAYS)
+        & (g["good_days"] >= MIN_GOOD_DAYS)
+        & (g["sites"] >= MIN_SITES)
+    )
+    return g.sort_values("good_days", ascending=False).reset_index(drop=True)
 
 
 def check_weather_coverage(
-    cell_lat: int,
-    cell_lon: int,
+    cell_lat: float,
+    cell_lon: float,
     cache: WeatherCache,
     years: Optional[List[int]] = None,
     season: Tuple[Tuple[int, int], Tuple[int, int]] = (SEASON_START, SEASON_END),
 ) -> float:
-    """
-    Проверяет покрытие погодными данными для ячейки.
-
-    Returns:
-        float: процент дней с данными (0-100) в сезонном окне
-    """
+    """Процент дней сезонного окна, для которых у ячейки есть срез 12 UTC."""
     if years is None:
         years = [2021, 2022, 2023, 2024, 2025, 2026]
     (s_month, s_day), (e_month, e_day) = season
-    target_dates = []
+    target_dates: List[pd.Timestamp] = []
     for y in years:
-        rng = pd.date_range(
-            pd.Timestamp(year=y, month=s_month, day=s_day),
-            pd.Timestamp(year=y, month=e_month, day=e_day),
+        target_dates.extend(
+            pd.date_range(
+                pd.Timestamp(year=y, month=s_month, day=s_day),
+                pd.Timestamp(year=y, month=e_month, day=e_day),
+            )
         )
-        target_dates.extend(rng)
-
-    available_count = 0
-    for date in target_dates:
-        sample = cache.load_sample(cell_lat, cell_lon, date, 12)
-        if sample:
-            available_count += 1
-
-    coverage = 100.0 * available_count / len(target_dates) if target_dates else 0.0
-    return coverage
+    if not target_dates:
+        return 0.0
+    available = sum(1 for d in target_dates if cache.load_sample(cell_lat, cell_lon, d, 12))
+    return 100.0 * available / len(target_dates)
 
 
 def get_cell_statistics(
@@ -149,208 +128,109 @@ def get_cell_statistics(
     min_xc_points: int = 10,
     flights_source: str = "world",
     flights_cache: Optional[str] = "data/processed/world_flights.pkl",
+    years: Optional[Sequence[int]] = None,
+    with_weather: bool = False,
 ) -> pd.DataFrame:
     """
-    Анализирует все доступные ячейки.
+    Считает метрики отбора по всем ячейкам с полётами и пишет CSV.
 
-    Args:
-        flights_dir: директория с файлами полётов
-        cache_root: корневая директория кэша погоды
-        output_path: путь для сохранения CSV
-        bbox: ограничение области в формате 'lon_min,lat_min,lon_max,lat_max'.
-              Если None, анализируются все ячейки.
-        min_xc_points: минимальные баллы XContest для качественного XC полёта
+    `bbox` ('lon_min,lat_min,lon_max,lat_max') — операционный охват продукта: то, для
+    чего мы готовы извлекать GFS. Это единственная география, которую здесь можно
+    задавать; накладывать поверх неё ещё и широтный пояс нельзя — так уже терялись
+    ячейки, проходившие критерии (Babadağ, Algodonales).
 
-    Returns:
-        DataFrame с метриками для каждой ячейки
+    `with_weather` дополнительно меряет покрытие погодным кэшем у прошедших ячеек —
+    диагностика, на отбор не влияет (кэша для новой сетки ещё нет).
     """
-    print("Загружаю все полёты...")
+    print("Загружаю полёты...")
     if flights_source == "world":
         df_flights = load_world_flights(
-            data_dir=flights_dir, bbox=bbox, cache_path=flights_cache
+            data_dir=flights_dir,
+            bbox=bbox,
+            years=list(years) if years else None,
+            cache_path=flights_cache,
         )
     else:
         df_flights = load_flights_to_dataframe(data_dir=flights_dir)
 
-    # Парсим bbox если указан
-    lon_min, lat_min, lon_max, lat_max = None, None, None, None
     if bbox:
-        try:
-            lon_min, lat_min, lon_max, lat_max = map(float, bbox.split(","))
-            print(f"\nОграничение области: bbox=[{lon_min},{lat_min},{lon_max},{lat_max}]")
-        except ValueError:
-            print(
-                f"\n⚠️ Неверный формат bbox: '{bbox}'. Ожидается 'lon_min,lat_min,lon_max,lat_max'."
-            )
-            print("Анализирую все ячейки.")
-
-    # Получаем список уникальных ячеек из полётов
-    df_geo = df_flights.dropna(subset=["takeoff_lat", "takeoff_lon"]).copy()
-    df_geo["cell_lat"] = df_geo["takeoff_lat"].apply(lambda x: int(np.floor(x)))
-    df_geo["cell_lon"] = df_geo["takeoff_lon"].apply(lambda x: int(np.floor(x)))
-
-    # Фильтруем по bbox если указан
-    if all(v is not None for v in [lon_min, lat_min, lon_max, lat_max]):
-        df_geo = df_geo[
-            (df_geo["takeoff_lon"] >= lon_min)
-            & (df_geo["takeoff_lon"] <= lon_max)
-            & (df_geo["takeoff_lat"] >= lat_min)
-            & (df_geo["takeoff_lat"] <= lat_max)
-        ].copy()
-        print(f"Отфильтровано {len(df_geo)} полётов в указанной области")
-
-    unique_cells = df_geo[["cell_lat", "cell_lon"]].drop_duplicates().values.tolist()
-    print(f"Найдено {len(unique_cells)} уникальных ячеек с полётами")
-
-    # Проверяем доступность погодных данных
-    cache = WeatherCache(cache_root=cache_root)
-    cache_cells_path = Path(cache_root) / "cells"
-    available_weather_cells = []
-
-    if cache_cells_path.exists():
-        for cell_dir in cache_cells_path.iterdir():
-            if cell_dir.is_dir() and "_" in cell_dir.name:
-                try:
-                    lat, lon = map(int, cell_dir.name.split("_"))
-                    available_weather_cells.append((lat, lon))
-                except ValueError:
-                    continue
-
-    print(f"Доступно {len(available_weather_cells)} ячеек с погодными данными")
-
-    # Пересечение: ячейки с полётами И погодными данными
-    cells_to_analyze = [
-        (lat, lon) for lat, lon in unique_cells if (lat, lon) in available_weather_cells
-    ]
-
-    print(f"\nАнализирую {len(cells_to_analyze)} ячеек с полётами И погодой...\n")
-
-    results = []
-    for cell_lat, cell_lon in tqdm(cells_to_analyze, desc="Анализ ячеек"):
-        # Анализ полётов
-        flight_stats = analyze_cell_flights(df_flights, cell_lat, cell_lon, min_xc_points)
-
-        # Проверка покрытия погодными данными
-        weather_coverage = check_weather_coverage(cell_lat, cell_lon, cache)
-
-        # Объединяем метрики
-        result = {**flight_stats, "weather_coverage": weather_coverage}
-
-        # Качественная оценка (чем выше, тем лучше)
-        quality_score = (
-            result["total_flights"] * 0.4
-            + result["flyable_days"] * 10.0
-            + result["weather_coverage"] * 2.0
-        )
-        result["quality_score"] = quality_score
-
-        # Рекомендация
-        if (
-            result["total_flights"] >= 200
-            and result["flyable_days"] >= 30
-            and result["weather_coverage"] >= 80
-        ):
-            result["recommendation"] = "include"
-        elif result["total_flights"] >= 100 and result["flyable_days"] >= 20:
-            result["recommendation"] = "borderline"
-        else:
-            result["recommendation"] = "exclude"
-
-        results.append(result)
-
-    # Создаём DataFrame и сортируем по quality_score
-    df_results = pd.DataFrame(results)
-    df_results = df_results.sort_values("quality_score", ascending=False)
-
-    # Сохраняем
-    df_results.to_csv(output_path, index=False)
-    print(f"\n✓ Результаты сохранены в {output_path}")
-
-    # Печатаем статистику
-    print("\n" + "=" * 60)
-    print("СТАТИСТИКА ПО РЕКОМЕНДАЦИЯМ")
-    print("=" * 60)
-    print(df_results["recommendation"].value_counts())
-
-    print("\n" + "=" * 60)
-    print("ТОП-10 ЯЧЕЕК ПО КАЧЕСТВУ")
-    print("=" * 60)
-    print(
-        df_results[
-            [
-                "cell_id",
-                "total_flights",
-                "flyable_days",
-                "weather_coverage",
-                "quality_score",
-                "recommendation",
-            ]
+        lon_min, lat_min, lon_max, lat_max = (float(x) for x in bbox.split(","))
+        print(f"Охват: bbox=[{lon_min},{lat_min},{lon_max},{lat_max}]")
+        df_flights = df_flights[
+            df_flights["takeoff_lon"].between(lon_min, lon_max)
+            & df_flights["takeoff_lat"].between(lat_min, lat_max)
         ]
-        .head(10)
-        .to_string(index=False)
-    )
 
+    df_results = cell_flight_stats(df_flights, min_xc_points=min_xc_points)
+    if df_results.empty:
+        print("Ни одной ячейки с полётами в охвате.")
+        return df_results
+
+    if with_weather:
+        cache = WeatherCache(cache_root=cache_root)
+        passing = df_results[df_results["passes"]]
+        print(f"Меряю покрытие погодой у {len(passing)} прошедших ячеек...")
+        cov = {
+            r.cell_id: check_weather_coverage(r.cell_lat, r.cell_lon, cache)
+            for r in passing.itertuples()
+        }
+        df_results["weather_coverage"] = df_results["cell_id"].map(cov)
+
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    df_results.to_csv(output_path, index=False)
+    print(f"\n✓ Метрики по {len(df_results)} ячейкам -> {output_path}")
+
+    n_pass = int(df_results["passes"].sum())
+    print(
+        f"\nКритерии (сетка {LAT_STEP:g}°): quality_days>={MIN_QUALITY_DAYS}, "
+        f"good_days>={MIN_GOOD_DAYS}, sites>={MIN_SITES}\n"
+        f"Проходят: {n_pass} из {len(df_results)}"
+    )
+    cols = ["cell_id", "total_flights", "quality_days", "good_days", "sites", "pilots"]
+    print("\nТОП-10 по good_days:")
+    print(df_results[cols].head(10).to_string(index=False))
     return df_results
 
 
 def select_quality_cells(
     cell_quality_path: str = "data/processed/cell_quality.csv",
-    min_flights: int = 200,
-    min_flyable_days: int = 30,
-    min_weather_coverage: float = 80.0,
-    min_regions: int = 3,
+    min_quality_days: int = MIN_QUALITY_DAYS,
+    min_good_days: int = MIN_GOOD_DAYS,
+    min_sites: int = MIN_SITES,
+    verbose: bool = True,
 ) -> List[str]:
-    """
-    Возвращает список cell_id ячеек, прошедших фильтрацию.
-
-    Args:
-        cell_quality_path: путь к CSV с метриками
-        min_flights: минимум полётов всего
-        min_flyable_days: минимум лётных дней
-        min_weather_coverage: минимум покрытия погодой (%)
-        min_regions: минимальное рекомендуемое количество ячеек
-
-    Returns:
-        List[str]: список cell_id вида ['45_11', '46_11', ...]
-    """
+    """Список cell_id, прошедших пороги, из CSV, посчитанного get_cell_statistics."""
     df = pd.read_csv(cell_quality_path)
-
     filtered = df[
-        (df["total_flights"] >= min_flights)
-        & (df["flyable_days"] >= min_flyable_days)
-        & (df["weather_coverage"] >= min_weather_coverage)
+        (df["quality_days"] >= min_quality_days)
+        & (df["good_days"] >= min_good_days)
+        & (df["sites"] >= min_sites)
     ]
+    selected = filtered["cell_id"].astype(str).tolist()
 
-    selected_cells = filtered["cell_id"].tolist()
+    if verbose:
+        print(f"\n✓ Отобрано {len(selected)} ячеек:")
+        for r in filtered.itertuples():
+            print(
+                f"  - {r.cell_id}: {r.total_flights} полётов, "
+                f"{r.quality_days} качественных дней, "
+                f"{r.good_days} дней >={GOOD_DISTANCE_KM:.0f} км, {r.sites} стартов"
+            )
+    # Сортируем географически: так диффы selected_cells.json читаемы.
+    return sorted(selected, key=lambda c: (cell_bounds(c)[0], cell_bounds(c)[1]))
 
-    print(f"\n✓ Выбрано {len(selected_cells)} ячеек:")
-    for cell_id in selected_cells:
-        row = filtered[filtered["cell_id"] == cell_id].iloc[0]
-        print(
-            f"  - {cell_id}: {row['total_flights']} полётов, "
-            f"{row['flyable_days']} лётных дней, "
-            f"{row['weather_coverage']:.1f}% покрытие"
-        )
 
-    # Предупреждение если ячеек меньше чем регионов
-    if len(selected_cells) < min_regions:
-        print(
-            f"\n⚠️  ПРЕДУПРЕЖДЕНИЕ: Выбрано {len(selected_cells)} ячеек, "
-            f"но настроено {min_regions} регионов."
-        )
-        print("   Рекомендуется увеличить область (--bbox) или снизить пороги фильтрации.")
-
-    return selected_cells
+def cell_stats_summary(df: pd.DataFrame) -> Dict[str, int]:
+    """Короткая сводка для лога/тестов."""
+    return {
+        "cells": len(df),
+        "passing": int(df["passes"].sum()) if "passes" in df else 0,
+    }
 
 
 if __name__ == "__main__":
-    # Анализируем все ячейки
     df_quality = get_cell_statistics()
-
-    # Выбираем качественные ячейки с консервативными порогами
-    selected = select_quality_cells(min_flights=400, min_flyable_days=60)
-
-    # Сохраняем список выбранных ячеек для dataset_builder_v2
+    selected = select_quality_cells()
     output_json = "data/processed/selected_cells.json"
     with open(output_json, "w") as f:
         json.dump(selected, f, indent=2)

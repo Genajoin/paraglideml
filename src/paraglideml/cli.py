@@ -20,7 +20,13 @@ from .config import (
     MODELS_DIR,
     PROCESSED_DATA_DIR,
 )
-from .data.cell_analyzer import get_cell_statistics, select_quality_cells
+from .data.cell_analyzer import (
+    MIN_GOOD_DAYS,
+    MIN_QUALITY_DAYS,
+    MIN_SITES,
+    get_cell_statistics,
+    select_quality_cells,
+)
 from .data.dataset_builder import build_multicell_dataset
 from .data.gfs_processor import run_gfs_cache_creation
 
@@ -59,7 +65,9 @@ def info():
     )
 
     typer.echo("=== Paraglideml Project Info ===")
-    typer.echo("Version: 0.1.0")
+    from importlib.metadata import version as _pkg_version
+
+    typer.echo(f"Version: {_pkg_version('paraglideml')}")
     typer.echo("\n[Paths]")
     typer.echo(f"  Data Root:      {DATA_DIR}")
     typer.echo(f"  GFS Raw:        {GFS_ANL_DIR}")
@@ -113,9 +121,13 @@ def data_prepare(
         PROCESSED_DATA_DIR / "selected_cells.json",
         help="Output JSON with selected cells",
     ),
-    min_flights: int = typer.Option(200, help="Minimum total flights"),
-    min_flyable_days: int = typer.Option(30, help="Minimum flyable days"),
-    min_coverage: float = typer.Option(80.0, help="Minimum weather coverage percent"),
+    min_quality_days: int = typer.Option(
+        MIN_QUALITY_DAYS, help="Minimum days with a quality XC flight (scaled by grid step)"
+    ),
+    min_good_days: int = typer.Option(
+        MIN_GOOD_DAYS, help="Minimum days with a >=50 km flight (scaled by grid step)"
+    ),
+    min_sites: int = typer.Option(MIN_SITES, help="Minimum distinct launch sites"),
     bbox: str = typer.Option(DEFAULT_BBOX, help="Bounding box 'lon_min,lat_min,lon_max,lat_max'"),
     no_bbox_filter: bool = typer.Option(
         False, "--no-bbox-filter", help="Disable bbox filtering (analyze all cells)"
@@ -123,9 +135,16 @@ def data_prepare(
     min_xc_points: int = typer.Option(
         DEFAULT_MIN_XC_POINTS, help="Minimum XContest points for quality XC flight"
     ),
+    with_weather: bool = typer.Option(
+        False, "--with-weather", help="Also measure GFS cache coverage (diagnostic, slow)"
+    ),
 ):
     """
-    Analyze flight logs and weather coverage to select quality cells for training.
+    Select training cells from the flight record.
+
+    Flights only — a brand-new cell has no weather cache yet, so requiring one would
+    mean only ever selecting what was already extracted. Thresholds are per degree of
+    latitude and scale with the grid step (see data/cell_analyzer.py).
     """
     import json
 
@@ -136,15 +155,15 @@ def data_prepare(
         output_path=str(output_csv),
         bbox=bbox if not no_bbox_filter else None,
         min_xc_points=min_xc_points,
+        with_weather=with_weather,
     )
 
     typer.echo("\nSelecting best cells...")
     selected = select_quality_cells(
         cell_quality_path=str(output_csv),
-        min_flights=min_flights,
-        min_flyable_days=min_flyable_days,
-        min_weather_coverage=min_coverage,
-        min_regions=DEFAULT_NUM_REGIONS,
+        min_quality_days=min_quality_days,
+        min_good_days=min_good_days,
+        min_sites=min_sites,
     )
 
     with open(output_json, "w") as f:
@@ -452,7 +471,7 @@ def forecast_tiers(
         0.5, help="P(>=good) threshold for the bot's push decision in the table"
     ),
     geojson: Optional[str] = typer.Option(
-        None, "--geojson", help="Also write the artifact (1-degree squares + tiers) to this path"
+        None, "--geojson", help="Also write the artifact (cell rectangles + tiers) to this path"
     ),
 ):
     """
@@ -483,7 +502,7 @@ def forecast_window_cmd(
     """
     Produce the production artifact: per-cell P(>=flyable/good/epic) for the next `days`
     days, each scored from its forecast lead-time off the run_date 00z cycle. Writes a
-    GeoJSON FeatureCollection of 1-degree squares (cells x days) — the R2 / map contract.
+    GeoJSON FeatureCollection of cell rectangles (cells x days) — the R2 / map contract.
     """
     import json as _json
 
@@ -542,10 +561,12 @@ def forecast_map(
 
     names = {}
     if labels:
-        lats = [r["lat"] for r in rows]
-        lons = [r["lon"] for r in rows]
-        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
-        names = busiest_launches(data_dir=str(FLIGHTS_DIR), bbox=bbox)
+        from .grid import cells_bbox
+
+        lon_min, lat_min, lon_max, lat_max = cells_bbox([r["cell"] for r in rows])
+        names = busiest_launches(
+            data_dir=str(FLIGHTS_DIR), bbox=f"{lon_min},{lat_min},{lon_max},{lat_max}"
+        )
 
     path = render_tier_map(rows, date, out, tier=tier, labels=names, top_n=top_n)
     typer.echo(f"Wrote {path}")

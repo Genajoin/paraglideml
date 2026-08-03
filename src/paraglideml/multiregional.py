@@ -46,6 +46,8 @@ from sklearn.metrics import (
     recall_score,
 )
 from sklearn.preprocessing import StandardScaler
+
+from .grid import cell_center
 from torch.utils.data import DataLoader, Dataset
 
 # =============================================================================
@@ -390,9 +392,7 @@ def cluster_regions(
     cell_ids = []
 
     for cell_id in df["cell_id"].unique():
-        lat, lon = map(int, cell_id.split("_"))
-        center_lat = lat + 0.5
-        center_lon = lon + 0.5
+        center_lat, center_lon = cell_center(cell_id)
         coords.append([center_lat, center_lon])
         cell_ids.append(cell_id)
 

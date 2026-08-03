@@ -7,7 +7,7 @@
 
 Paraglideml forecasts the *cross-country potential* of a paragliding day over the Alps from [GFS](https://www.nco.ncep.noaa.gov/pmb/products/gfs/) weather and historical flights from [XContest](https://www.xcontest.org/).
 
-It does not answer a flat "fly / don't fly". It estimates calibrated, cumulative probabilities over flight-quality tiers, keyed to the realistic XC distance a good pilot could achieve in a 1° cell:
+It does not answer a flat "fly / don't fly". It estimates calibrated, cumulative probabilities over flight-quality tiers, keyed to the realistic XC distance a good pilot could achieve in one grid cell (0.75° lat × 1° lon, ~83 × 80 km at mid-latitudes):
 
 | Tier | Meaning | Probability |
 |---|---|---|
@@ -49,10 +49,12 @@ Python API (torch-free):
 from paraglideml import predict_tiers, tiers_to_geojson
 
 rows = predict_tiers("2026-06-15")          # downloads the GFS slice, scores every cell
-# → [{'cell': '46_13', 'lat': 46, 'lon': 13, 'date': '2026-06-15',
+# → [{'cell': '46.50_13', 'lat': 46.5, 'lon': 13, 'date': '2026-06-15',
 #     'lead': 0, 'p_flyable': 1.0, 'p_good': 0.56, 'p_epic': 0.33}, ...]
+# The cell id is its south-west corner in degrees; read the cell size off the
+# FeatureCollection's cell_lat_degrees / cell_lon_degrees, never assume 1°.
 
-geojson = tiers_to_geojson(rows, "2026-06-15")   # FeatureCollection of honest 1° squares
+geojson = tiers_to_geojson(rows, "2026-06-15")   # FeatureCollection of honest cell rectangles
 ```
 
 CLI:
@@ -82,16 +84,16 @@ The production path emits the artifact the map consumes:
 
 ```bash
 # Per-cell P(≥flyable/good/epic) for the next 3 days, each scored from its
-# forecast lead-time off the run_date 00z GFS cycle → GeoJSON of 1° squares.
+# forecast lead-time off the run_date 00z GFS cycle → GeoJSON of cell rectangles.
 paraglideml forecast-window --run-date 2026-06-14 --days 3 --out forecast.geojson
 ```
 
 ```
-GFS 00z (byte-range) → paraglideml (features + calibrated GBM) → GeoJSON 1° squares
+GFS 00z (byte-range) → paraglideml (features + calibrated GBM) → GeoJSON cell rectangles
    → object storage (R2) → Cloudflare Worker → map layer (coloured by P(≥good), date navigator)
 ```
 
-This is wired into the [FlyBeeper](https://flybeeper.com) live map: a once-a-day pipeline publishes the artifact, a Worker serves it, and a MapLibre layer renders the cells. The 1° granularity (~100 km) is rendered as honest squares — never implying point accuracy. Forecast horizon is 3 days by design (see the scores above; measure it yourself with `paraglideml forecast-skew`).
+This is wired into the [FlyBeeper](https://flybeeper.com) live map: a once-a-day pipeline publishes the artifact, a Worker serves it, and a MapLibre layer renders the cells. The cell granularity (~80 km) is rendered as honest rectangles — never implying point accuracy. The latitude step is 0.75°, not 1°: a 1°×1° cell is a rectangle by construction (111 km tall, 111·cos(lat) km wide), so on the map it stood 1.45× taller than wide at Alpine latitudes. Forecast horizon is 3 days by design (see the scores above; measure it yourself with `paraglideml forecast-skew`).
 
 ---
 

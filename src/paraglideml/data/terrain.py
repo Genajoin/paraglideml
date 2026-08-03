@@ -26,16 +26,13 @@ from typing import Dict, List, Optional
 import numpy as np
 
 from ..config import CELL_TERRAIN_PATH, FLYBEEPER_SITES_DIR, PROCESSED_DATA_DIR
+from ..grid import cell_id as _cell_of
 
 # Orientation order: index k -> compass bearing k*45 (N, NE, E, SE, S, SW, W, NW).
 ORIENTATIONS = [0, 45, 90, 135, 180, 225, 270, 315]
 # dhv directionsText tokens (German/intl) -> orientation index.
 _DIR_TOKEN = {"N": 0, "NO": 1, "NE": 1, "O": 2, "E": 2, "SO": 3, "SE": 3,
               "S": 4, "SW": 5, "W": 6, "NW": 7}
-
-
-def _cell_of(lat: float, lon: float) -> str:
-    return f"{int(math.floor(lat))}_{int(math.floor(lon))}"
 
 
 def _takeoff_orientations(props: dict) -> set:

@@ -35,6 +35,7 @@ from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import run_gfs_cache_creation
 from .data.terrain import add_terrain_features, load_cell_terrain
 from .data.weather_cache import WeatherCache
+from .grid import cell_anchor
 from .predict import _resolve_ordinal_experiment, download_gfs_slice
 from .tiers import TIERS
 
@@ -73,7 +74,7 @@ def _vectors_from_cache(
     keys: List[Tuple[str, pd.Timestamp]] = []
     rows: List[List[float]] = []
     for cell in cells:
-        lat, lon = map(int, cell.split("_"))
+        lat, lon = cell_anchor(cell)
         tcell = terrain.get(cell)
         for d in dates:
             rec = compute_day_features(cache, lat, lon, d)

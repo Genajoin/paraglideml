@@ -30,20 +30,16 @@ from typing import Iterable, List, Optional, Sequence, Tuple
 import numpy as np
 
 from ..config import GFS_CACHE_DIR, PROCESSED_DATA_DIR
+from ..grid import cell_anchor
 from .gfs_processor import get_cache_path, process_grib_pygrib
 
 HOURS = (6, 12, 18)
 
 
-def _parse_cell(cell_id: str) -> Tuple[int, int]:
-    lat, lon = cell_id.split("_")
-    return int(lat), int(lon)
-
-
-def load_extract_cells(path: Optional[Path] = None) -> List[Tuple[int, int]]:
-    """Cell list to extract, as (lat, lon) ints. Defaults to extract_cells.json."""
+def load_extract_cells(path: Optional[Path] = None) -> List[Tuple[float, float]]:
+    """Cell list to extract, as (lat, lon) anchors. Defaults to extract_cells.json."""
     path = Path(path or PROCESSED_DATA_DIR / "extract_cells.json")
-    return [_parse_cell(c) for c in json.loads(path.read_text())]
+    return [cell_anchor(c) for c in json.loads(path.read_text())]
 
 
 def slices_between(start: dt.date, end: dt.date, months: Sequence[int]) -> List[dt.datetime]:
@@ -58,8 +54,8 @@ def slices_between(start: dt.date, end: dt.date, months: Sequence[int]) -> List[
 
 
 def _missing_cells(
-    when: dt.datetime, cells: Sequence[Tuple[int, int]], cache_root: Path
-) -> List[Tuple[int, int]]:
+    when: dt.datetime, cells: Sequence[Tuple[float, float]], cache_root: Path
+) -> List[Tuple[float, float]]:
     return [c for c in cells if not get_cache_path(cache_root, c[0], c[1], when).exists()]
 
 
@@ -151,8 +147,8 @@ def run_backfill(
         archive_root = Path(archive_root)
         archive_root.mkdir(parents=True, exist_ok=True)
 
-    cell_list: List[Tuple[int, int]] = (
-        [_parse_cell(c) for c in cells] if cells else load_extract_cells()
+    cell_list: List[Tuple[float, float]] = (
+        [cell_anchor(c) for c in cells] if cells else load_extract_cells()
     )
     start_d = dt.datetime.strptime(start, "%Y-%m-%d").date()
     end_d = dt.datetime.strptime(end, "%Y-%m-%d").date()

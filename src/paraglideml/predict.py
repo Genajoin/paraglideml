@@ -30,6 +30,7 @@ from .data.dataset_builder import compute_day_features
 from .data.gfs_processor import PRESSURE_LEVELS, run_gfs_cache_creation
 from .data.terrain import add_terrain_features, load_cell_terrain
 from .data.weather_cache import WeatherCache
+from .grid import LAT_STEP, LON_STEP, cell_anchor, cell_ring, cells_bbox
 from .tiers import TIER_LABELS
 
 # torch + the NN model are imported lazily inside run_forecast() so the ordinal /
@@ -224,9 +225,8 @@ def _fetch_and_extract(
     # hardcoded Alpine box, which silently dropped every cell outside it — with the
     # 132-cell European set that was 85 cells returning no features at all.
     if cells:
-        lats = [int(c.split("_")[0]) for c in cells]
-        lons = [int(c.split("_")[1]) for c in cells]
-        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
+        lon_min, lat_min, lon_max, lat_max = cells_bbox(cells)
+        bbox = f"{lon_min},{lat_min},{lon_max},{lat_max}"
     else:
         bbox = "6.0,43.0,17.0,49.0"
 
@@ -309,7 +309,7 @@ def run_forecast(
 
     rows = []
     for cell in cells:
-        lat, lon = map(int, cell.split("_"))
+        lat, lon = cell_anchor(cell)
         rec = compute_day_features(cache, lat, lon, ts)
         if rec is None:
             continue
@@ -404,7 +404,7 @@ def predict_tiers(
 
     rows: List[dict] = []
     for cell in cells:
-        lat, lon = map(int, cell.split("_"))
+        lat, lon = cell_anchor(cell)
         rec = compute_day_features(cache, lat, lon, ts)
         if rec is None:
             continue
@@ -446,17 +446,17 @@ def forecast_window(
 
 
 def tiers_to_geojson(rows: List[dict], date_str: Optional[str] = None) -> dict:
-    """Render tier rows as a GeoJSON FeatureCollection of honest 1-degree squares.
+    """Render tier rows as a GeoJSON FeatureCollection of honest cell rectangles.
 
-    Each GFS cell `lat_lon` covers [lon, lon+1] x [lat, lat+1] degrees; we emit that exact
-    square polygon (not a point) so the map never implies sub-cell precision. This is the
-    artifact contract: the pipeline writes it to R2, the Worker serves it, the map layer
-    and the GitHub snapshot demo both render it.
+    Each cell `lat0_lon0` covers [lon0, lon0+LON_STEP] x [lat0, lat0+LAT_STEP] degrees; we
+    emit that exact polygon (not a point) so the map never implies sub-cell precision. This
+    is the artifact contract: the pipeline writes it to R2, the Worker serves it, the map
+    layer and the GitHub snapshot demo both render it. Consumers must read the cell size
+    from `cell_lat_degrees` / `cell_lon_degrees` on the wrapper, never assume 1°.
     """
     features = []
     for r in rows:
-        lat, lon = int(r["lat"]), int(r["lon"])
-        ring = [[lon, lat], [lon + 1, lat], [lon + 1, lat + 1], [lon, lat + 1], [lon, lat]]
+        ring = cell_ring(r["cell"])
         props = {
             "cell": r["cell"],
             "p_flyable": round(float(r.get("p_flyable", 0.0)), 4),
@@ -473,7 +473,14 @@ def tiers_to_geojson(rows: List[dict], date_str: Optional[str] = None) -> dict:
             "geometry": {"type": "Polygon", "coordinates": [ring]},
             "properties": props,
         })
-    return {"type": "FeatureCollection", "features": features}
+    # The grid travels WITH the data. Cell size stopped being 1° and a consumer that
+    # infers geometry from the id (the storm overlay used to) needs to read it, not guess.
+    return {
+        "type": "FeatureCollection",
+        "cell_lat_degrees": LAT_STEP,
+        "cell_lon_degrees": LON_STEP,
+        "features": features,
+    }
 
 
 def run_ordinal_forecast(

@@ -15,6 +15,7 @@ from tqdm import tqdm
 
 from paraglideml.data.flight_parsing import load_flights_to_dataframe, load_world_flights
 from paraglideml.data.weather_cache import WeatherCache
+from paraglideml.grid import cell_bounds, cells_bbox
 
 
 def compute_label_confidence(row: pd.Series) -> float:
@@ -133,7 +134,7 @@ def build_cell_dataset(
     Создаёт датасет для одной ячейки.
 
     Args:
-        cell_id: строка вида '45_11'
+        cell_id: строка вида '45.75_11' (см. paraglideml.grid)
         df_flights: DataFrame со всеми полётами
         cache: экземпляр WeatherCache
         min_xc_points: минимальные баллы XContest для качественного XC полёта
@@ -143,17 +144,17 @@ def build_cell_dataset(
                                cell_id, cell_lat, cell_lon, [weather_features],
                                is_weekend, day_of_year
     """
-    cell_lat, cell_lon = map(int, cell_id.split("_"))
+    lat0, lon0, lat1, lon1 = cell_bounds(cell_id)
+    cell_lat, cell_lon = lat0, lon0
 
-    # Фильтруем полёты в границах ячейки (±0.5° от центра)
-    cell_center_lat = cell_lat + 0.5
-    cell_center_lon = cell_lon + 0.5
-    TOLERANCE = 0.5
-
+    # Границы ячейки полуоткрыты — ровно как в grid.cell_id, иначе полёт на общей
+    # меже попал бы в обе соседние ячейки сразу.
     df_geo = df_flights.dropna(subset=["takeoff_lat", "takeoff_lon"])
     df_cell = df_geo[
-        (df_geo["takeoff_lat"].between(cell_center_lat - TOLERANCE, cell_center_lat + TOLERANCE))
-        & (df_geo["takeoff_lon"].between(cell_center_lon - TOLERANCE, cell_center_lon + TOLERANCE))
+        (df_geo["takeoff_lat"] >= lat0)
+        & (df_geo["takeoff_lat"] < lat1)
+        & (df_geo["takeoff_lon"] >= lon0)
+        & (df_geo["takeoff_lon"] < lon1)
     ].copy()
 
     if len(df_cell) == 0:
@@ -263,7 +264,7 @@ def build_multicell_dataset(
     Создаёт объединённый датасет из нескольких ячеек.
 
     Args:
-        cells: список cell_id вида ['45_11', '46_11', ...].
+        cells: список cell_id вида ['45.75_11', '46.50_11', ...].
                Если None, загружается из selected_cells.json
         flights_dir: путь к папке с JSON полётами
         cache_root: корень weather cache
@@ -287,9 +288,8 @@ def build_multicell_dataset(
     if flights_source == "world":
         # Ограничиваем разбор bbox'ом выбранных ячеек: мировой экспорт — 5M полётов
         # в 15.5k файлах, а нужна лишь горстка ячеек.
-        lats = [int(c.split("_")[0]) for c in cells]
-        lons = [int(c.split("_")[1]) for c in cells]
-        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
+        lon_min, lat_min, lon_max, lat_max = cells_bbox(cells)
+        bbox = f"{lon_min},{lat_min},{lon_max},{lat_max}"
         df_flights = load_world_flights(data_dir=flights_dir, bbox=bbox, cache_path=flights_cache)
     else:
         df_flights = load_flights_to_dataframe(data_dir=flights_dir)

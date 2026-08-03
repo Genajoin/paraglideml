@@ -4,6 +4,8 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 
+from ..grid import cell_id as make_cell_id
+
 
 class WeatherCache:
     """
@@ -13,8 +15,8 @@ class WeatherCache:
     def __init__(self, cache_root: str = "data/gfs/cache"):
         self.cache_root = Path(cache_root)
 
-    def get_file_path(self, lat: int, lon: int, date: pd.Timestamp, hour: int) -> Path:
-        cell_id = f"{lat}_{lon}"
+    def get_file_path(self, lat: float, lon: float, date: pd.Timestamp, hour: int) -> Path:
+        cell_id = make_cell_id(lat, lon)
         yyyy = date.strftime("%Y")
         mm = date.strftime("%m")
         yyyymmdd = date.strftime("%Y%m%d")
@@ -23,7 +25,7 @@ class WeatherCache:
         return self.cache_root / "cells" / cell_id / yyyy / mm / filename
 
     def load_sample(
-        self, lat: int, lon: int, date: pd.Timestamp, hour: int
+        self, lat: float, lon: float, date: pd.Timestamp, hour: int
     ) -> Optional[Dict[str, Any]]:
         path = self.get_file_path(lat, lon, date, hour)
         if not path.exists():

@@ -7,6 +7,9 @@ import pygrib
 from tqdm import tqdm
 
 from ..config import GFS_ANL_DIR, GFS_CACHE_DIR
+from ..grid import cell_anchor
+from ..grid import cell_id as make_cell_id
+from ..grid import cells_in_bbox
 
 # =============================================================================
 # SCHEMA CONFIGURATION
@@ -74,20 +77,16 @@ def parse_date_ranges(date_ranges_str: str) -> List[datetime]:
     return sorted(list(set(datetimes)))
 
 
-def parse_bbox(bbox_str: str) -> List[Tuple[int, int]]:
-    parts = [float(x.strip()) for x in bbox_str.split(",")]
-    lon_min, lat_min, lon_max, lat_max = parts
-    cells = []
-    for lat in range(int(np.floor(lat_min)), int(np.ceil(lat_max))):
-        for lon in range(int(np.floor(lon_min)), int(np.ceil(lon_max))):
-            cells.append((lat, lon))
-    return cells
+def parse_bbox(bbox_str: str) -> List[Tuple[float, float]]:
+    """Cell anchors covering a bbox, on the project grid (see paraglideml.grid)."""
+    lon_min, lat_min, lon_max, lat_max = (float(x.strip()) for x in bbox_str.split(","))
+    return [cell_anchor(c) for c in cells_in_bbox(lon_min, lat_min, lon_max, lat_max)]
 
 
-def get_cache_path(base_dir: Path, lat: int, lon: int, dt: datetime) -> Path:
+def get_cache_path(base_dir: Path, lat: float, lon: float, dt: datetime) -> Path:
     return (
         base_dir
-        / f"cells/{lat}_{lon}"
+        / f"cells/{make_cell_id(lat, lon)}"
         / dt.strftime("%Y/%m")
         / dt.strftime("gfsanl_3_%Y%m%d_%H00_000.npz")
     )

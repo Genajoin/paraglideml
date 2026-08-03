@@ -16,6 +16,8 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from .grid import LAT_STEP, LON_STEP, cell_id
+
 TIERS = {
     "flyable": ("p_flyable", "≥ 15 км", "Вероятность лётного дня"),
     "good": ("p_good", "≥ 50 км", "Вероятность хорошего XC-дня"),
@@ -46,7 +48,7 @@ def rows_from_artifact(path: str) -> List[dict]:
     for f in gj["features"]:
         pr = f["properties"]
         lon, lat = f["geometry"]["coordinates"][0][0]
-        rows.append({**pr, "lat": int(lat), "lon": int(lon)})
+        rows.append({**pr, "lat": float(lat), "lon": float(lon)})
     return rows
 
 
@@ -67,11 +69,7 @@ def busiest_launches(
     except Exception:
         return {}
     df = df[df["points"] >= 10]
-    cell = (
-        np.floor(df["takeoff_lat"]).astype(int).astype(str)
-        + "_"
-        + np.floor(df["takeoff_lon"]).astype(int).astype(str)
-    )
+    cell = [cell_id(la, lo) for la, lo in zip(df["takeoff_lat"], df["takeoff_lon"])]
     counts = df.assign(cell=cell).groupby(["cell", "takeoff_name"]).size().reset_index(name="n")
     counts = counts.sort_values("n", ascending=False).drop_duplicates("cell")
     return dict(zip(counts["cell"], counts["takeoff_name"]))
@@ -87,7 +85,7 @@ def render_tier_map(
     subtitle: Optional[str] = None,
     footer: Optional[str] = None,
 ) -> str:
-    """Draw the cells as 1-degree squares coloured by the chosen tier probability."""
+    """Draw the cells as their true grid rectangles, coloured by the chosen tier probability."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -112,7 +110,12 @@ def render_tier_map(
     lons = [r["lon"] for r in rows]
     lats = [r["lat"] for r in rows]
     pad_x, pad_y = 2.5, 1.5
-    extent = [min(lons) - pad_x, max(lons) + 1 + pad_x, min(lats) - pad_y, max(lats) + 1 + pad_y]
+    extent = [
+        min(lons) - pad_x,
+        max(lons) + LON_STEP + pad_x,
+        min(lats) - pad_y,
+        max(lats) + LAT_STEP + pad_y,
+    ]
     span_x, span_y = extent[1] - extent[0], extent[3] - extent[2]
 
     map_w = 10.6
@@ -127,12 +130,14 @@ def render_tier_map(
     for s in ax.spines.values():
         s.set_visible(False)
 
-    # Honest 1-degree squares — the artifact contract; never implying point accuracy.
+    # Honest cell rectangles — the artifact contract; never implying point accuracy.
     # The surface-coloured inset keeps neighbouring fills from merging into one blob.
+    inset = 0.05
     for r in rows:
         ax.add_patch(
             Rectangle(
-                (r["lon"] + 0.05, r["lat"] + 0.05), 0.90, 0.90,
+                (r["lon"] + inset, r["lat"] + inset),
+                LON_STEP - 2 * inset, LAT_STEP - 2 * inset,
                 facecolor=_bin_colour(r[key]), edgecolor=SURFACE, lw=1.3,
                 transform=ccrs.PlateCarree(), zorder=3,
             )
@@ -142,9 +147,10 @@ def render_tier_map(
     # shoulder to shoulder and any inline label collides with its neighbours. The badge
     # is small and corner-anchored so it doesn't wash out the colour being ranked.
     for i, r in enumerate(ranked, 1):
-        bx, by = r["lon"] + 0.26, r["lat"] + 0.74
+        bx, by = r["lon"] + 0.26 * LON_STEP, r["lat"] + 0.74 * LAT_STEP
         ax.add_patch(
-            Circle((bx, by), 0.23, facecolor=SURFACE, edgecolor="#5a5a55", lw=0.8,
+            Circle((bx, by), 0.23 * min(LAT_STEP, LON_STEP), facecolor=SURFACE,
+                   edgecolor="#5a5a55", lw=0.8,
                    transform=ccrs.PlateCarree(), zorder=6)
         )
         ax.text(bx, by, str(i), fontsize=6.6, color=INK, ha="center", va="center",
@@ -179,8 +185,11 @@ def render_tier_map(
                 f"{r['p_good']:>4.0%} {r['p_epic']:>4.0%}",
                 fontsize=8.6, color=INK2, va="top", family="monospace")
 
-    fig.text(0.015, 0.012, footer or "Ячейка 1° ≈ 110 км — квадрат честный, не точка.",
-             fontsize=8.5, color=MUTED)
+    default_footer = (
+        f"Ячейка {LAT_STEP:g}°×{LON_STEP:g}° ≈ {LAT_STEP * 111:.0f} км по широте — "
+        "прямоугольник честный, не точка."
+    )
+    fig.text(0.015, 0.012, footer or default_footer, fontsize=8.5, color=MUTED)
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=170, facecolor=SURFACE)
     plt.close(fig)

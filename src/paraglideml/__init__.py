@@ -5,7 +5,7 @@ Library inference API (torch-free; install `paraglideml[inference]`):
 
     from paraglideml import predict_tiers, tiers_to_geojson
     rows = predict_tiers("2026-06-12")              # per-cell P(>=flyable/good/epic)
-    geojson = tiers_to_geojson(rows, "2026-06-12")  # 1-degree squares for the map
+    geojson = tiers_to_geojson(rows, "2026-06-12")  # cell rectangles for the map
 
 Defaults to the bundled exp_056 model; point a prod deployment at a fresher model with
 $PARAGLIDEML_MODEL_DIR (see paraglideml.assets). Training / NN code lives behind the
