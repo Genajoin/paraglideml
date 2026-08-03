@@ -499,6 +499,58 @@ def forecast_window_cmd(
         raise
 
 
+@app.command("forecast-map")
+def forecast_map(
+    date: Optional[str] = typer.Option(None, "--date", help="Target date YYYY-MM-DD"),
+    out: str = typer.Option("forecast_map.png", "--out", help="Output PNG path"),
+    tier: str = typer.Option("good", "--tier", help="flyable | good | epic"),
+    artifact: Optional[str] = typer.Option(
+        None, "--artifact", help="Render a published flyability.v1 JSON instead of scoring now"
+    ),
+    model_dir: Optional[str] = typer.Option(None, "--model-dir", help="Model dir override"),
+    run_date: Optional[str] = typer.Option(
+        None, "--run-date", help="Score as the forecast from this GFS run instead of the analysis"
+    ),
+    top_n: int = typer.Option(10, "--top", help="How many cells to badge and table"),
+    labels: bool = typer.Option(
+        True, help="Label cells with their busiest launch site (needs the flight export)"
+    ),
+):
+    """
+    Render the per-cell tier forecast as a map PNG — the GeoJSON artifact as a picture.
+
+    Either scores a date now (--date) or draws an already published artifact (--artifact),
+    so a run can be eyeballed without opening the web map. Needs `paraglideml[train]`
+    (matplotlib + cartopy).
+    """
+    from .mapviz import busiest_launches, render_tier_map, rows_from_artifact
+
+    if artifact:
+        rows = rows_from_artifact(artifact)
+        date = date or rows[0].get("date")
+    else:
+        if not date:
+            typer.echo("Pass --date or --artifact", err=True)
+            raise typer.Exit(1)
+        from .predict import predict_tiers
+
+        rows = predict_tiers(date, model_dir=Path(model_dir) if model_dir else None,
+                             run_date=run_date)
+    if not date:
+        typer.echo("Could not determine the date to render", err=True)
+        raise typer.Exit(1)
+
+    names = {}
+    if labels:
+        lats = [r["lat"] for r in rows]
+        lons = [r["lon"] for r in rows]
+        bbox = f"{min(lons)},{min(lats)},{max(lons) + 1},{max(lats) + 1}"
+        names = busiest_launches(data_dir=str(FLIGHTS_DIR), bbox=bbox)
+
+    path = render_tier_map(rows, date, out, tier=tier, labels=names, top_n=top_n)
+    typer.echo(f"Wrote {path}")
+
+
 @app.command("forecast-skew")
 def forecast_skew(
     start: str = typer.Option(..., "--start", help="Window start YYYY-MM-DD (valid days with known outcomes)"),
